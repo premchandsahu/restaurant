@@ -1,8 +1,7 @@
 import 'dart:convert';
-
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'dart:convert';
 
 import 'package:intl/intl.dart';
 import '../../models/pos/bill.dart';
@@ -13,17 +12,24 @@ import '../../services/pos/pos_bill_pdf_service.dart';
 import '../../models/pos/active_hotel_stay.dart';
 import '../../services/pos/hotel_stay_service.dart';
 import '../../widgets/pos/charge_to_room_dialog.dart';
+import '../../services/pos/customer_order_service.dart';
 
 class PosBillScreen extends StatefulWidget {
   final int billId;
   final String baseUrl;
   final String token;
-
+  // Customer mode
+  final bool customerView;
+  final String? customerSessionToken;
+  final int? customerOrderId;
   const PosBillScreen({
     super.key,
     required this.billId,
     required this.baseUrl,
     required this.token,
+    this.customerView = false,
+    this.customerSessionToken,
+    this.customerOrderId,
   });
 
   @override
@@ -32,7 +38,9 @@ class PosBillScreen extends StatefulWidget {
 
 class _PosBillScreenState extends State<PosBillScreen> {
   late final PosOrderService _orderService;
+  late final CustomerOrderService _customerOrderService;
   late final HotelStayService _hotelStayService;
+  Timer? _customerBillTimer;
   Bill? _bill;
   bool _loading = true;
   String? _error;
@@ -45,11 +53,29 @@ class _PosBillScreenState extends State<PosBillScreen> {
       baseUrl: widget.baseUrl,
       token: widget.token,
     );
+    _customerOrderService = CustomerOrderService(
+      baseUrl: widget.baseUrl,
+      token: '',
+    );
     _hotelStayService = HotelStayService(
       baseUrl: widget.baseUrl,
       token: widget.token,
     );
     _loadBill();
+
+    if (widget.customerView) {
+      _customerBillTimer = Timer.periodic(
+        const Duration(seconds: 5),
+        (_) => _refreshCustomerBill(),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _customerBillTimer?.cancel();
+
+    super.dispose();
   }
 
   Future<void> _chargeRestaurantBill({
@@ -206,7 +232,23 @@ class _PosBillScreenState extends State<PosBillScreen> {
     });
 
     try {
-      final bill = await _orderService.getBill(widget.billId);
+      Bill bill;
+
+      if (widget.customerView) {
+        if (widget.customerSessionToken == null ||
+            widget.customerOrderId == null) {
+          throw Exception('Customer session information is missing');
+        }
+
+        final data = await _customerOrderService.getCustomerBill(
+          customerSessionToken: widget.customerSessionToken!,
+          orderId: widget.customerOrderId!,
+        );
+
+        bill = Bill.fromJson(Map<String, dynamic>.from(data['bill']));
+      } else {
+        bill = await _orderService.getBill(widget.billId);
+      }
 
       if (!mounted) return;
 
@@ -221,6 +263,39 @@ class _PosBillScreenState extends State<PosBillScreen> {
         _loading = false;
         _error = e.toString();
       });
+    }
+  }
+
+  Future<void> _refreshCustomerBill() async {
+    if (!mounted) return;
+
+    if (!widget.customerView) return;
+
+    // Don't overlap with the initial/manual loading.
+    if (_loading) return;
+
+    try {
+      if (widget.customerSessionToken == null ||
+          widget.customerOrderId == null) {
+        return;
+      }
+
+      final data = await _customerOrderService.getCustomerBill(
+        customerSessionToken: widget.customerSessionToken!,
+        orderId: widget.customerOrderId!,
+      );
+
+      final bill = Bill.fromJson(Map<String, dynamic>.from(data['bill']));
+
+      if (!mounted) return;
+
+      setState(() {
+        _bill = bill;
+      });
+    } catch (e) {
+      // Customer may temporarily lose connectivity.
+      // The next cycle will try again.
+      debugPrint('Customer bill auto-refresh failed: $e');
     }
   }
 
@@ -659,9 +734,75 @@ class _PosBillScreenState extends State<PosBillScreen> {
   Widget _buildActionButtons(Bill bill) {
     final isPaid = bill.billStatus.toUpperCase() == 'PAID';
 
+    final isCustomerView = widget.customerView;
+
     return LayoutBuilder(
       builder: (context, constraints) {
         final vertical = constraints.maxWidth < 550;
+
+        // --------------------------------------------------
+        // Customer view
+        //
+        // Customer can view/print/share the bill.
+        // Payment and Charge To Room are operator actions.
+        // --------------------------------------------------
+
+        if (isCustomerView) {
+          if (vertical) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(
+                  height: 48,
+                  child: OutlinedButton.icon(
+                    onPressed: _printBill,
+                    icon: const Icon(Icons.print),
+                    label: const Text('PRINT BILL'),
+                  ),
+                ),
+
+                const SizedBox(height: 10),
+
+                SizedBox(
+                  height: 48,
+                  child: OutlinedButton.icon(
+                    onPressed: _shareBill,
+                    icon: const Icon(Icons.share),
+                    label: const Text('SHARE'),
+                  ),
+                ),
+              ],
+            );
+          }
+
+          return Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _printBill,
+                  icon: const Icon(Icons.print),
+                  label: const Text('PRINT BILL'),
+                ),
+              ),
+
+              const SizedBox(width: 10),
+
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: _shareBill,
+                  icon: const Icon(Icons.share),
+                  label: const Text('SHARE'),
+                ),
+              ),
+            ],
+          );
+        }
+
+        // --------------------------------------------------
+        // Existing POS view
+        //
+        // Keep existing functionality unchanged.
+        // --------------------------------------------------
 
         final buttons = [
           Expanded(
@@ -687,6 +828,7 @@ class _PosBillScreenState extends State<PosBillScreen> {
               label: Text(isPaid ? 'PAID' : 'PAYMENT'),
             ),
           ),
+
           Expanded(
             child: ElevatedButton.icon(
               onPressed: _chargeToRoom,
@@ -708,7 +850,9 @@ class _PosBillScreenState extends State<PosBillScreen> {
                   label: const Text('PRINT BILL'),
                 ),
               ),
+
               const SizedBox(height: 10),
+
               SizedBox(
                 height: 48,
                 child: OutlinedButton.icon(
@@ -717,7 +861,9 @@ class _PosBillScreenState extends State<PosBillScreen> {
                   label: const Text('SHARE'),
                 ),
               ),
+
               const SizedBox(height: 10),
+
               SizedBox(
                 height: 48,
                 child: ElevatedButton.icon(
@@ -726,13 +872,15 @@ class _PosBillScreenState extends State<PosBillScreen> {
                   label: Text(isPaid ? 'PAID' : 'PAYMENT'),
                 ),
               ),
+
               const SizedBox(height: 10),
+
               SizedBox(
                 height: 48,
                 child: ElevatedButton.icon(
                   onPressed: _chargeToRoom,
                   icon: const Icon(Icons.hotel),
-                  label: Text('CHARGE TO ROOM'),
+                  label: const Text('CHARGE TO ROOM'),
                 ),
               ),
             ],
@@ -742,11 +890,17 @@ class _PosBillScreenState extends State<PosBillScreen> {
         return Row(
           children: [
             buttons[0],
+
             const SizedBox(width: 10),
+
             buttons[1],
+
             const SizedBox(width: 10),
+
             buttons[2],
+
             const SizedBox(width: 10),
+
             buttons[3],
           ],
         );

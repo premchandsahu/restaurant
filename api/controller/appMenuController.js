@@ -93,11 +93,14 @@ exports.getMyMenus = async (req, res) => {
         /*
          * Build hierarchy.
          */
+
+    
         const menuMap = new Map();
 
         for (const menu of menus) {
             menuMap.set(menu.menuId, menu);
         }
+        //console.log(menuMap);
 
         const rootMenus = [];
 

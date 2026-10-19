@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-
+import 'package:restapp/screens/pos/customer_menu_screen.dart';
+import 'customer_menu_screen.dart';
 import '../../models/pos/customer_order_status.dart';
 import '../../services/pos/customer_order_service.dart';
+import 'pos_bill_screen.dart';
 
 class CustomerOrderStatusScreen extends StatefulWidget {
   final String customerSessionToken;
@@ -25,7 +27,7 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
   Timer? _statusTimer;
   bool _statusRequestInProgress = false;
   CustomerOrderStatus? _data;
-
+  final Map<int, Map<String, dynamic>> _customerBills = {};
   bool _loading = true;
   bool _refreshing = false;
   String? _error;
@@ -79,6 +81,8 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
       setState(() {
         _data = result;
       });
+
+      await _checkCustomerBills(result);
     } catch (e) {
       // Don't show a SnackBar every 5 seconds if
       // the network temporarily goes down.
@@ -87,6 +91,40 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
       _statusRequestInProgress = false;
     }
   }
+
+  Future<void> _checkCustomerBills(CustomerOrderStatus result) async {
+    for (final order in result.orders) {
+      if (!order.billRequested) {
+        continue;
+      }
+
+      // Already obtained the bill for this order.
+      if (_customerBills.containsKey(order.orderId)) {
+        continue;
+      }
+
+      try {
+        final billData = await _service.getCustomerBill(
+          customerSessionToken: widget.customerSessionToken,
+          orderId: order.orderId,
+        );
+
+        if (!mounted) return;
+
+        setState(() {
+          _customerBills[order.orderId] = billData;
+        });
+      } catch (e) {
+        // Bill may not have been created yet.
+        // The next polling cycle will try again.
+        debugPrint(
+          'Customer bill not ready for order '
+          '${order.orderId}: $e',
+        );
+      }
+    }
+  }
+
   // ----------------------------------------------------------
   // Load order status
   // ----------------------------------------------------------
@@ -116,6 +154,8 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
         _loading = false;
         _refreshing = false;
       });
+
+      await _checkCustomerBills(result);
     } catch (e) {
       if (!mounted) return;
 
@@ -143,7 +183,7 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('My Order'),
+        title: const Text('Table Dashboard'),
         actions: [
           IconButton(
             tooltip: 'Refresh',
@@ -209,6 +249,30 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
     );
   }
 
+  Widget _buildOrderFoodButton() {
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton.icon(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => CustomerMenuScreen(
+                customerSessionToken: widget.customerSessionToken,
+                baseUrl: widget.baseUrl,
+              ),
+            ),
+          );
+        },
+        icon: const Icon(Icons.restaurant_menu),
+        label: const Text(
+          'ORDER FOOD',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      ),
+    );
+  }
+
   // ----------------------------------------------------------
   // Main content
   // ----------------------------------------------------------
@@ -221,11 +285,16 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
       padding: const EdgeInsets.all(12),
       children: [
         _buildCustomerHeader(data),
+
         const SizedBox(height: 12),
 
-        if (data.orders.isEmpty)
-          _buildNoOrders()
-        else
+        if (data.orders.isEmpty) ...[
+          _buildOrderFoodButton(),
+
+          const SizedBox(height: 16),
+
+          _buildNoOrders(),
+        ] else
           ...data.orders.map(
             (order) => Padding(
               padding: const EdgeInsets.only(bottom: 12),
@@ -234,9 +303,7 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
           ),
       ],
     );
-  }
-
-  // ----------------------------------------------------------
+  } // ----------------------------------------------------------
   // Customer / table header
   // ----------------------------------------------------------
 
@@ -300,7 +367,7 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
             ),
             const SizedBox(height: 16),
             const Text(
-              'No orders yet',
+              'Start your order by selecting items from the menu.',
               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
@@ -465,17 +532,51 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
               _buildTotalRow('Balance', order.balanceAmount, bold: true),
 
             if (order.billRequested)
-              _buildBillRequested()
+              _customerBills.containsKey(order.orderId)
+                  ? _buildBillReady(order)
+                  : _buildBillRequested()
             else if (order.balanceAmount > 0 &&
                 order.orderStatus != 'CANCELLED' &&
-                order.orderStatus != 'VOID')
+                order.orderStatus != 'VOID') ...[
               _buildRequestBillButton(order),
+              const SizedBox(height: 8),
+              _buildAddMoreItemsButton(order),
+            ],
           ],
         ),
       ),
     );
   }
 
+  Widget _buildAddMoreItemsButton(CustomerOrder order) {
+    final status = (order.orderStatus ?? 'OPEN').toUpperCase();
+
+    const blockedStatuses = ['BILLED', 'PAID', 'CANCELLED', 'VOID', 'MERGED'];
+
+    if (blockedStatuses.contains(status)) {
+      return const SizedBox.shrink();
+    }
+
+    return SizedBox(
+      width: double.infinity,
+      child: OutlinedButton.icon(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => CustomerMenuScreen(
+                customerSessionToken: widget.customerSessionToken,
+                baseUrl: widget.baseUrl,
+                existingOrderId: order.orderId,
+              ),
+            ),
+          );
+        },
+        icon: const Icon(Icons.add_shopping_cart),
+        label: const Text('ADD MORE ITEMS'),
+      ),
+    );
+  }
   // ----------------------------------------------------------
   // Order item
   // ----------------------------------------------------------
@@ -709,6 +810,85 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
     );
   }
 
+  Widget _buildBillReady(CustomerOrder order) {
+    final billData = _customerBills[order.orderId];
+
+    final bill = billData?['bill'];
+
+    final billId = bill?['bill_id'] is int
+        ? bill['bill_id'] as int
+        : int.tryParse(bill?['bill_id']?.toString() ?? '');
+
+    final billNo = bill?['bill_no']?.toString() ?? '';
+
+    final grandTotal =
+        double.tryParse(bill?['grand_total']?.toString() ?? '0') ?? 0;
+
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.green.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.green),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Bill Ready',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+
+          if (billNo.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text('Bill No: $billNo'),
+          ],
+
+          const SizedBox(height: 4),
+
+          Text(
+            'Amount: ₹${grandTotal.toStringAsFixed(2)}',
+            style: const TextStyle(fontWeight: FontWeight.w600),
+          ),
+
+          const SizedBox(height: 10),
+
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: billId == null
+                  ? null
+                  : () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => PosBillScreen(
+                            billId: billId,
+                            baseUrl: widget.baseUrl,
+                            token: '',
+                            customerView: true,
+                            customerSessionToken: widget.customerSessionToken,
+                            customerOrderId: order.orderId,
+                          ),
+                        ),
+                      );
+                    },
+              icon: const Icon(Icons.receipt_long),
+              label: const Text('VIEW BILL'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
   // ----------------------------------------------------------
   // Total row
   // ----------------------------------------------------------
@@ -743,6 +923,21 @@ class _CustomerOrderStatusScreenState extends State<CustomerOrderStatusScreen>
     switch (status) {
       case 'SENT_TO_KITCHEN':
         return 'KITCHEN';
+
+      case 'NEW':
+        return 'ACCEPTED';
+
+      case 'ACCEPTED':
+        return 'ACCEPTED';
+
+      case 'PREPARING':
+        return 'PREPARING';
+
+      case 'READY':
+        return 'READY';
+
+      case 'SERVED':
+        return 'SERVED';
 
       case 'PREPARING':
         return 'PREPARING';

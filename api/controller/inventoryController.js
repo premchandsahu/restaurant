@@ -95,6 +95,197 @@ exports.getUnits = async (req, res) => {
 };
 
 
+// Add the following handlers immediately after exports.getUnits
+// in controller/inventoryController.js.
+// Existing GET /inventory/units remains unchanged.
+
+// ============================================================
+// CREATE UNIT
+// POST /inventory/units
+// ============================================================
+exports.createUnit = async (req, res) => {
+    const connection = await db.getConnection();
+
+    try {
+        const unitCode = String(req.body.unitCode || '').trim();
+        const unitName = String(req.body.unitName || '').trim();
+        const decimalPlaces = req.body.decimalPlaces === undefined
+            ? 3
+            : Number(req.body.decimalPlaces);
+
+        if (!unitCode) {
+            return res.status(400).json({
+                success: false,
+                message: 'unitCode is required'
+            });
+        }
+        if (unitCode.length > 20) {
+            return res.status(400).json({
+                success: false,
+                message: 'unitCode cannot exceed 20 characters'
+            });
+        }
+        if (!unitName) {
+            return res.status(400).json({
+                success: false,
+                message: 'unitName is required'
+            });
+        }
+        if (unitName.length > 50) {
+            return res.status(400).json({
+                success: false,
+                message: 'unitName cannot exceed 50 characters'
+            });
+        }
+        if (!Number.isInteger(decimalPlaces) || decimalPlaces < 0 || decimalPlaces > 10) {
+            return res.status(400).json({
+                success: false,
+                message: 'decimalPlaces must be a whole number between 0 and 10'
+            });
+        }
+
+        try {
+            const [result] = await connection.query(
+                `INSERT INTO unit (unit_code, unit_name, decimal_places)
+                 VALUES (?, ?, ?)`,
+                [unitCode, unitName, decimalPlaces]
+            );
+
+            return res.status(201).json({
+                success: true,
+                message: 'Unit created successfully',
+                unit: {
+                    unitId: result.insertId,
+                    unitCode,
+                    unitName,
+                    decimalPlaces
+                }
+            });
+        } catch (error) {
+            if (error.code === 'ER_DUP_ENTRY') {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Unit code already exists'
+                });
+            }
+            throw error;
+        }
+    } catch (error) {
+        console.error('Create unit error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to create unit'
+        });
+    } finally {
+        connection.release();
+    }
+};
+
+
+// ============================================================
+// UPDATE UNIT
+// PUT /inventory/units/:unitId
+// ============================================================
+exports.updateUnit = async (req, res) => {
+    const connection = await db.getConnection();
+
+    try {
+        const unitId = Number(req.params.unitId);
+        if (!Number.isInteger(unitId) || unitId <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid unitId'
+            });
+        }
+
+        const [units] = await connection.query(
+            `SELECT unit_id, unit_code, unit_name, decimal_places
+             FROM unit WHERE unit_id = ? LIMIT 1`,
+            [unitId]
+        );
+
+        if (units.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Unit not found'
+            });
+        }
+
+        const existing = units[0];
+        const unitCode = String(
+            req.body.unitCode ?? existing.unit_code
+        ).trim();
+        const unitName = String(
+            req.body.unitName ?? existing.unit_name
+        ).trim();
+        const decimalPlaces = req.body.decimalPlaces === undefined
+            ? Number(existing.decimal_places ?? 3)
+            : Number(req.body.decimalPlaces);
+
+        if (!unitCode) {
+            return res.status(400).json({
+                success: false,
+                message: 'unitCode is required'
+            });
+        }
+        if (unitCode.length > 20) {
+            return res.status(400).json({
+                success: false,
+                message: 'unitCode cannot exceed 20 characters'
+            });
+        }
+        if (!unitName) {
+            return res.status(400).json({
+                success: false,
+                message: 'unitName is required'
+            });
+        }
+        if (unitName.length > 50) {
+            return res.status(400).json({
+                success: false,
+                message: 'unitName cannot exceed 50 characters'
+            });
+        }
+        if (!Number.isInteger(decimalPlaces) || decimalPlaces < 0 || decimalPlaces > 10) {
+            return res.status(400).json({
+                success: false,
+                message: 'decimalPlaces must be a whole number between 0 and 10'
+            });
+        }
+
+        try {
+            await connection.query(
+                `UPDATE unit
+                 SET unit_code = ?, unit_name = ?, decimal_places = ?
+                 WHERE unit_id = ?`,
+                [unitCode, unitName, decimalPlaces, unitId]
+            );
+        } catch (error) {
+            if (error.code === 'ER_DUP_ENTRY') {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Unit code already exists'
+                });
+            }
+            throw error;
+        }
+
+        return res.json({
+            success: true,
+            message: 'Unit updated successfully'
+        });
+    } catch (error) {
+        console.error('Update unit error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to update unit'
+        });
+    } finally {
+        connection.release();
+    }
+};
+
+
 // ============================================================
 // GET INVENTORY CATEGORIES
 //
@@ -148,6 +339,177 @@ exports.getCategories = async (req, res) => {
         connection.release();
     }
 };
+
+
+
+// ============================================================
+// INVENTORY CATEGORY MASTER CRUD ADDITIONS
+// Paste these two handlers into the existing inventoryController.js,
+// immediately after exports.getCategories (or another suitable location).
+// Existing exports.getCategories remains unchanged.
+// ============================================================
+
+exports.createInventoryCategory = async (req, res) => {
+    const connection = await db.getConnection();
+
+    try {
+        const code = String(req.body.categoryCode || '').trim();
+        const name = String(req.body.categoryName || '').trim();
+
+        if (!code) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryCode is required'
+            });
+        }
+        if (code.length > 50) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryCode cannot exceed 50 characters'
+            });
+        }
+        if (!name) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryName is required'
+            });
+        }
+        if (name.length > 150) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryName cannot exceed 150 characters'
+            });
+        }
+
+        try {
+            const [result] = await connection.query(
+                `INSERT INTO inventory_category
+                    (company_id, category_code, category_name)
+                 VALUES (?, ?, ?)`,
+                [req.user.companyId, code, name]
+            );
+
+            return res.status(201).json({
+                success: true,
+                message: 'Inventory category created successfully',
+                category: {
+                    inventoryCategoryId: result.insertId,
+                    categoryCode: code,
+                    categoryName: name
+                }
+            });
+        } catch (error) {
+            if (error.code === 'ER_DUP_ENTRY') {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Category code already exists for this company'
+                });
+            }
+            throw error;
+        }
+    } catch (error) {
+        console.error('Create inventory category error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to create inventory category'
+        });
+    } finally {
+        connection.release();
+    }
+};
+
+exports.updateInventoryCategory = async (req, res) => {
+    const connection = await db.getConnection();
+
+    try {
+        const categoryId = Number(req.params.categoryId);
+        if (!Number.isSafeInteger(categoryId) || categoryId <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid categoryId'
+            });
+        }
+
+        const [rows] = await connection.query(
+            `SELECT inventory_category_id, category_code, category_name
+             FROM inventory_category
+             WHERE inventory_category_id = ? AND company_id = ?
+             LIMIT 1`,
+            [categoryId, req.user.companyId]
+        );
+
+        if (rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Inventory category not found'
+            });
+        }
+
+        const existing = rows[0];
+        const code = String(
+            req.body.categoryCode ?? existing.category_code
+        ).trim();
+        const name = String(
+            req.body.categoryName ?? existing.category_name
+        ).trim();
+
+        if (!code) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryCode is required'
+            });
+        }
+        if (code.length > 50) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryCode cannot exceed 50 characters'
+            });
+        }
+        if (!name) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryName is required'
+            });
+        }
+        if (name.length > 150) {
+            return res.status(400).json({
+                success: false,
+                message: 'categoryName cannot exceed 150 characters'
+            });
+        }
+
+        try {
+            await connection.query(
+                `UPDATE inventory_category
+                 SET category_code = ?, category_name = ?
+                 WHERE inventory_category_id = ? AND company_id = ?`,
+                [code, name, categoryId, req.user.companyId]
+            );
+        } catch (error) {
+            if (error.code === 'ER_DUP_ENTRY') {
+                return res.status(409).json({
+                    success: false,
+                    message: 'Category code already exists for this company'
+                });
+            }
+            throw error;
+        }
+
+        return res.json({
+            success: true,
+            message: 'Inventory category updated successfully'
+        });
+    } catch (error) {
+        console.error('Update inventory category error:', error);
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to update inventory category'
+        });
+    } finally {
+        connection.release();
+    }
+};
+
 
 
 // ============================================================

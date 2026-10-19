@@ -81,6 +81,189 @@ const crypto = require('crypto');
  * ============================================================
  */
 
+
+// ============================================================
+// GET /api/orders/qr/pending
+//
+// Returns QR orders having one or more order items that are
+// still OPEN and therefore waiting to be sent to kitchen.
+//
+// This supports incremental QR ordering:
+//
+// First order:
+//   4 Roti -> OPEN -> notification -> KOT -> SENT_TO_KITCHEN
+//
+// Later customer adds:
+//   2 Roti -> new OPEN item -> notification -> KOT
+//
+// No existing KOT logic is changed.
+// ============================================================
+
+exports.getPendingQROrders = async (req, res) => {
+    const connection = await db.getConnection();
+
+    try {
+
+        const outletId = Number(req.query.outletId);
+
+        if (!outletId) {
+            return res.status(400).json({
+                success: false,
+                message: 'outletId is required'
+            });
+        }
+
+        const [orders] = await connection.query(
+            `
+            SELECT
+
+                o.order_id,
+                o.order_uuid,
+                o.order_no,
+
+                o.outlet_id,
+
+                o.order_type,
+                o.order_source,
+                o.order_status,
+
+                o.table_id,
+                rt.table_code,
+                rt.table_name,
+
+                o.logical_table_id,
+                lt.logical_code,
+                lt.logical_name,
+
+                o.customer_session_id,
+
+                cos.customer_name,
+                cos.customer_phone,
+
+                o.guest_count,
+
+                o.grand_total,
+                o.paid_amount,
+                o.balance_amount,
+
+                COUNT(oi.order_item_id) AS pending_line_count,
+
+                COALESCE(
+                    SUM(oi.qty),
+                    0
+                ) AS pending_item_qty,
+
+                MIN(oi.created_at) AS first_pending_at,
+
+                MAX(oi.created_at) AS last_pending_at
+
+            FROM orders o
+
+            INNER JOIN outlet ot
+                ON ot.outlet_id = o.outlet_id
+
+            INNER JOIN user_outlet uo
+                ON uo.outlet_id = o.outlet_id
+               AND uo.user_id = ?
+
+            INNER JOIN restaurant_table rt
+                ON rt.table_id = o.table_id
+
+            LEFT JOIN logical_table lt
+                ON lt.logical_table_id = o.logical_table_id
+
+            LEFT JOIN customer_order_session cos
+                ON cos.customer_session_id =
+                   o.customer_session_id
+
+            INNER JOIN order_item oi
+                ON oi.order_id = o.order_id
+               AND oi.status = 'OPEN'
+
+            WHERE o.outlet_id = ?
+
+              AND ot.company_id = ?
+
+              AND o.order_type = 'QR_ORDER'
+
+              AND o.order_source = 'QR'
+
+              AND o.order_status NOT IN
+              (
+                  'PAID',
+                  'CANCELLED',
+                  'VOID',
+                  'MERGED',
+                  'BILLED'
+              )
+
+            GROUP BY
+
+                o.order_id,
+                o.order_uuid,
+                o.order_no,
+
+                o.outlet_id,
+
+                o.order_type,
+                o.order_source,
+                o.order_status,
+
+                o.table_id,
+                rt.table_code,
+                rt.table_name,
+
+                o.logical_table_id,
+                lt.logical_code,
+                lt.logical_name,
+
+                o.customer_session_id,
+
+                cos.customer_name,
+                cos.customer_phone,
+
+                o.guest_count,
+
+                o.grand_total,
+                o.paid_amount,
+                o.balance_amount
+
+            ORDER BY
+                first_pending_at ASC
+            `,
+
+            [
+                req.user.userId,
+                outletId,
+                req.user.companyId
+            ]
+        );
+
+        return res.json({
+            success: true,
+            outletId,
+            count: orders.length,
+            pendingOrders: orders
+        });
+
+    } catch (error) {
+
+        console.error(
+            'Get pending QR orders error:',
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to get pending QR orders'
+        });
+
+    } finally {
+
+        connection.release();
+    }
+};
+
 exports.mergeOrders = async (req, res) => {
 
     const connection = await db.getConnection();
@@ -2560,9 +2743,10 @@ async function addOrderItemInternal(
     // -----------------------------------------
 
     const blockedStatuses = [
-        'PAID',
-        'CANCELLED',
-        'VOID'
+        'BILLED',
+    'PAID',
+    'CANCELLED',
+    'VOID'
     ];
 
 
@@ -4399,9 +4583,9 @@ exports.updateOrder = async (req, res) => {
             orderType ?? order.order_type;
 
         const newTableId =
-            newOrderType === 'DINE_IN'
-                ? tableId
-                : null;
+            ['DINE_IN', 'QR_ORDER'].includes(newOrderType)
+        ? tableId
+        : null;
 
 
         // --------------------------------------------------
@@ -4923,5 +5107,198 @@ const connection = await db.getConnection();
             message:
                 'Unable to get table order'
         });
+    }
+};
+
+/*
+ * ============================================================
+ * POST /api/orders/:orderId/request-bill
+ *
+ * Request bill for an authenticated POS/Captain user.
+ * ============================================================
+ */
+exports.requestBill = async (req, res) => {
+    const connection = await db.getConnection();
+
+    try {
+        const orderId = Number(req.params.orderId);
+
+        if (!orderId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid orderId'
+            });
+        }
+
+        await connection.beginTransaction();
+
+        // --------------------------------------------------
+        // Get and lock order
+        // --------------------------------------------------
+
+        const [orders] = await connection.query(
+            `
+            SELECT
+                o.order_id,
+                o.outlet_id,
+                o.order_no,
+                o.order_status,
+                o.table_id,
+                o.bill_requested,
+                o.grand_total,
+                o.paid_amount,
+                o.balance_amount
+
+            FROM orders o
+
+            INNER JOIN outlet ot
+                ON ot.outlet_id = o.outlet_id
+
+            INNER JOIN user_outlet uo
+                ON uo.outlet_id = o.outlet_id
+
+            WHERE o.order_id = ?
+              AND ot.company_id = ?
+              AND uo.user_id = ?
+
+            LIMIT 1
+
+            FOR UPDATE
+            `,
+            [
+                orderId,
+                req.user.companyId,
+                req.user.userId
+            ]
+        );
+
+        if (orders.length === 0) {
+            await connection.rollback();
+
+            return res.status(404).json({
+                success: false,
+                message: 'Order not found'
+            });
+        }
+
+        const order = orders[0];
+
+        // --------------------------------------------------
+        // Validate order
+        // --------------------------------------------------
+
+        const blockedStatuses = [
+            'BILLED',
+            'PAID',
+            'CANCELLED',
+            'VOID',
+            'MERGED'
+        ];
+
+        if (blockedStatuses.includes(order.order_status)) {
+            await connection.rollback();
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    `Bill cannot be requested for ${order.order_status} order`
+            });
+        }
+
+        if (Number(order.balance_amount || 0) <= 0) {
+            await connection.rollback();
+
+            return res.status(400).json({
+                success: false,
+                message: 'Order has no outstanding balance'
+            });
+        }
+
+        // --------------------------------------------------
+        // Already requested
+        // --------------------------------------------------
+
+        if (order.bill_requested) {
+            await connection.commit();
+
+            return res.json({
+                success: true,
+                message: 'Bill has already been requested',
+                orderId: order.order_id,
+                billRequested: true
+            });
+        }
+
+        // --------------------------------------------------
+        // Mark bill requested
+        // --------------------------------------------------
+
+        await connection.query(
+            `
+            UPDATE orders
+
+            SET
+                bill_requested = 1,
+                bill_requested_at = CURRENT_TIMESTAMP,
+                updated_by = ?
+
+            WHERE order_id = ?
+            `,
+            [
+                req.user.userId,
+                orderId
+            ]
+        );
+
+        // --------------------------------------------------
+        // Update physical table status
+        // --------------------------------------------------
+
+        if (order.table_id) {
+            await connection.query(
+                `
+                UPDATE restaurant_table
+
+                SET
+                    status = 'BILL_REQUESTED'
+
+                WHERE table_id = ?
+                  AND outlet_id = ?
+                `,
+                [
+                    order.table_id,
+                    order.outlet_id
+                ]
+            );
+        }
+
+        await connection.commit();
+
+        return res.json({
+            success: true,
+            message: 'Bill requested successfully',
+            orderId: order.order_id,
+            billRequested: true
+        });
+
+    } catch (error) {
+        try {
+            await connection.rollback();
+        } catch (_) {}
+
+        console.error(
+            'Request bill error:',
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message:
+                error.message ||
+                'Unable to request bill'
+        });
+
+    } finally {
+        connection.release();
     }
 };

@@ -8,10 +8,27 @@ const customerOrderController =
 const authenticate =
     require('../middleware/authMiddleware');
 
-    router.post(
+
+router.post(
+    '/start-table-session',
+    customerOrderController.startTableSessionByUuid
+);
+
+router.post(
     '/table-session',
     authenticate,
     customerOrderController.createTableSession
+);
+
+router.get(
+    '/admin/qr-tables',
+    authenticate,
+    customerOrderController.getQrTables
+);
+
+router.get(
+    '/qr/:token',
+    customerOrderController.getTableByQrToken
 );
 
 router.get(
@@ -55,7 +72,10 @@ router.post(
     customerOrderController.requestBill
 );
 
-
+router.get(
+    '/bill/:token/:orderId',
+    customerOrderController.getCustomerBill
+);
 router.post(
     '/cancel-item',
     customerOrderController.cancelCustomerOrderItem

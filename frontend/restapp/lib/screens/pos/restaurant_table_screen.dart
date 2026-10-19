@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:restapp/screens/pos/pos_order_screen.dart';
 import '../../services/pos/pos_order_service.dart';
@@ -29,6 +30,20 @@ class _RestaurantTableScreenState extends State<RestaurantTableScreen> {
   bool loading = true;
   String? error;
 
+  // --------------------------------------------------
+  // Pending QR order notification
+  // --------------------------------------------------
+
+  Timer? _qrOrderTimer;
+  Timer? _tableLayoutTimer;
+
+  bool _loadingTableLayout = false;
+  List<Map<String, dynamic>> _pendingQROrders = [];
+
+  bool _loadingPendingQR = false;
+
+  bool _pendingQRInitialized = false;
+
   @override
   void initState() {
     super.initState();
@@ -37,6 +52,19 @@ class _RestaurantTableScreenState extends State<RestaurantTableScreen> {
       token: widget.apiClient.token ?? '',
     );
     loadLayout();
+
+    // Initial QR order check.
+    _loadPendingQROrders();
+
+    // Keep checking for newly submitted QR orders.
+    _qrOrderTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _loadPendingQROrders(),
+    );
+    _tableLayoutTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => loadLayout(silent: true),
+    );
   }
 
   Widget _buildTableSummary() {
@@ -357,12 +385,34 @@ class _RestaurantTableScreenState extends State<RestaurantTableScreen> {
     );
   }
 
-  Future<void> loadLayout() async {
+  @override
+  void dispose() {
+    _qrOrderTimer?.cancel();
+    _tableLayoutTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> loadLayout({bool silent = false}) async {
+    if (_loadingTableLayout) {
+      return;
+    }
+
+    _loadingTableLayout = true;
+
     try {
-      setState(() {
-        loading = true;
-        error = null;
-      });
+      if (!silent) {
+        setState(() {
+          loading = true;
+          error = null;
+        });
+      }
+
+      final previousBillRequestedIds =
+          layout?.tables
+              .where((table) => table.status == 'BILL_REQUESTED')
+              .map((table) => table.tableId)
+              .toSet() ??
+          <int>{};
 
       final response = await widget.apiClient.get(
         '/outlets/${widget.outletId}/pos-layout',
@@ -383,23 +433,322 @@ class _RestaurantTableScreenState extends State<RestaurantTableScreen> {
         );
       }
 
+      final newlyBillRequested = result.tables
+          .where(
+            (table) =>
+                table.status == 'BILL_REQUESTED' &&
+                !previousBillRequestedIds.contains(table.tableId),
+          )
+          .toList();
+
+      if (!mounted) {
+        return;
+      }
+
       setState(() {
         layout = result;
 
-        if (result.floors.isNotEmpty) {
-          selectedFloorId = result.floors.first.floorId;
+        // On first/manual load select the first floor.
+        // During silent refresh preserve the user's current selection.
+        if (!silent ||
+            selectedFloorId == null ||
+            !result.floors.any((floor) => floor.floorId == selectedFloorId)) {
+          selectedFloorId = result.floors.isNotEmpty
+              ? result.floors.first.floorId
+              : null;
         }
 
-        selectedDiningAreaId = null;
+        // Preserve dining-area selection during silent refresh.
+        if (selectedDiningAreaId != null &&
+            !result.diningAreas.any(
+              (area) => area.diningAreaId == selectedDiningAreaId,
+            )) {
+          selectedDiningAreaId = null;
+        }
 
-        loading = false;
+        if (!silent) {
+          loading = false;
+        }
       });
+
+      // Notify only when a new bill request appears.
+      if (silent && newlyBillRequested.isNotEmpty && mounted) {
+        final table = newlyBillRequested.first;
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Bill requested • ${table.tableName}'),
+            duration: const Duration(seconds: 4),
+            action: SnackBarAction(
+              label: 'VIEW',
+              onPressed: () => onTableSelected(table),
+            ),
+          ),
+        );
+      }
     } catch (e) {
-      setState(() {
-        loading = false;
-        error = e.toString();
-      });
+      if (!mounted) {
+        return;
+      }
+
+      if (!silent) {
+        setState(() {
+          loading = false;
+          error = e.toString();
+        });
+      } else {
+        debugPrint('Silent table layout refresh failed: $e');
+      }
+    } finally {
+      _loadingTableLayout = false;
     }
+  }
+  // --------------------------------------------------
+  // Load pending QR orders
+  // --------------------------------------------------
+
+  Future<void> _loadPendingQROrders() async {
+    if (_loadingPendingQR) {
+      return;
+    }
+
+    _loadingPendingQR = true;
+
+    try {
+      final orders = await _orderService.getPendingQROrders(
+        outletId: widget.outletId,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      // IDs that were pending during the previous poll.
+      final previousIds = _pendingQROrders
+          .map((order) => order['order_id'].toString())
+          .toSet();
+
+      // Detect QR orders that have newly become pending.
+      final newlyPending = _pendingQRInitialized
+          ? orders.where((order) {
+              final orderId = order['order_id'].toString();
+              return !previousIds.contains(orderId);
+            }).toList()
+          : <Map<String, dynamic>>[];
+
+      setState(() {
+        _pendingQROrders = orders;
+        _pendingQRInitialized = true;
+      });
+
+      // Don't notify on the first load.
+      // Notify only when something newly appears.
+      if (newlyPending.isNotEmpty) {
+        final first = newlyPending.first;
+
+        final tableCode = first['table_code']?.toString() ?? 'Table';
+
+        final customerName = first['customer_name']?.toString() ?? 'Customer';
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('New QR order received • $tableCode • $customerName'),
+            duration: const Duration(seconds: 4),
+            action: SnackBarAction(
+              label: 'VIEW',
+              onPressed: _showPendingQROrdersDialog,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      // QR notification failure should not disturb
+      // the normal table/order screen.
+      debugPrint('Pending QR order check failed: $e');
+    } finally {
+      _loadingPendingQR = false;
+    }
+  }
+
+  // --------------------------------------------------
+  // Show pending QR orders
+  // --------------------------------------------------
+
+  Future<void> _showPendingQROrdersDialog() async {
+    // Refresh immediately before opening the dialog.
+    await _loadPendingQROrders();
+
+    if (!mounted) {
+      return;
+    }
+
+    await showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              const Icon(Icons.qr_code_scanner),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Pending QR Orders (${_pendingQROrders.length})'),
+              ),
+            ],
+          ),
+          content: SizedBox(
+            width: 500,
+            child: _pendingQROrders.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 30),
+                    child: Center(child: Text('No pending QR orders')),
+                  )
+                : ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: _pendingQROrders.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 8),
+                    itemBuilder: (context, index) {
+                      final order = _pendingQROrders[index];
+
+                      final tableCode =
+                          order['table_code']?.toString() ?? 'Table';
+
+                      final customerName =
+                          order['customer_name']?.toString() ?? 'Customer';
+
+                      final orderNo =
+                          order['order_no']?.toString() ??
+                          order['order_id'].toString();
+
+                      final pendingLines =
+                          order['pending_line_count']?.toString() ?? '0';
+
+                      final pendingQty =
+                          order['pending_item_qty']?.toString() ?? '0';
+
+                      return Card(
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(10),
+                          onTap: () {
+                            Navigator.pop(dialogContext);
+
+                            final tableId = int.tryParse(
+                              order['table_id'].toString(),
+                            );
+
+                            final orderId = int.tryParse(
+                              order['order_id'].toString(),
+                            );
+
+                            if (tableId == null || orderId == null) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Invalid QR order information'),
+                                ),
+                              );
+                              return;
+                            }
+
+                            final table = _findTableById(tableId);
+
+                            if (table == null) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Table not found in current layout',
+                                  ),
+                                ),
+                              );
+                              return;
+                            }
+
+                            _openExistingOrder(table, orderId);
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        'Order #$orderNo',
+                                        style: const TextStyle(
+                                          fontSize: 17,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                    const Icon(Icons.notifications_active),
+                                  ],
+                                ),
+
+                                const SizedBox(height: 8),
+
+                                Text(
+                                  '$tableCode • $customerName',
+                                  style: TextStyle(
+                                    color: Colors.grey.shade700,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+
+                                const SizedBox(height: 8),
+
+                                Text(
+                                  '$pendingLines pending line(s) • '
+                                  '$pendingQty item(s) '
+                                  'waiting for kitchen',
+                                  style: TextStyle(color: Colors.grey.shade700),
+                                ),
+
+                                const SizedBox(height: 8),
+
+                                const Row(
+                                  children: [
+                                    Icon(Icons.arrow_forward, size: 16),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      'Open order and SEND TO KITCHEN',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(dialogContext);
+              },
+              child: const Text('CLOSE'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  RestaurantTable? _findTableById(int tableId) {
+    if (layout == null) {
+      return null;
+    }
+
+    for (final table in layout!.tables) {
+      if (table.tableId == tableId) {
+        return table;
+      }
+    }
+
+    return null;
   }
 
   List<RestaurantTable> get filteredTables {
@@ -1029,6 +1378,49 @@ class _RestaurantTableScreenState extends State<RestaurantTableScreen> {
         title: Text(data.outlet.outletName),
 
         actions: [
+          // ------------------------------------------------
+          // Pending QR orders
+          // ------------------------------------------------
+          Stack(
+            children: [
+              IconButton(
+                tooltip: 'Pending QR Orders',
+                onPressed: _showPendingQROrdersDialog,
+                icon: const Icon(Icons.qr_code_scanner),
+              ),
+
+              if (_pendingQROrders.isNotEmpty)
+                Positioned(
+                  right: 5,
+                  top: 5,
+                  child: Container(
+                    constraints: const BoxConstraints(
+                      minWidth: 19,
+                      minHeight: 19,
+                    ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 5,
+                      vertical: 2,
+                    ),
+                    decoration: const BoxDecoration(
+                      color: Colors.red,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      '${_pendingQROrders.length}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+
+          // Existing table-layout refresh
           IconButton(onPressed: loadLayout, icon: const Icon(Icons.refresh)),
         ],
       ),
@@ -1146,9 +1538,57 @@ class _RestaurantTableScreenState extends State<RestaurantTableScreen> {
                     itemBuilder: (context, index) {
                       final table = filteredTables[index];
 
-                      return RestaurantTableCard(
-                        table: table,
-                        onTap: () => onTableSelected(table),
+                      final isBillRequested = table.status == 'BILL_REQUESTED';
+
+                      return Stack(
+                        children: [
+                          RestaurantTableCard(
+                            table: table,
+                            onTap: () => onTableSelected(table),
+                          ),
+
+                          if (isBillRequested)
+                            Positioned(
+                              top: 8,
+                              right: 8,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 5,
+                                ),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(20),
+                                  color: Colors.deepPurple,
+                                  boxShadow: const [
+                                    BoxShadow(
+                                      blurRadius: 4,
+                                      offset: Offset(0, 2),
+                                      color: Colors.black26,
+                                    ),
+                                  ],
+                                ),
+                                child: const Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.receipt_long,
+                                      size: 13,
+                                      color: Colors.white,
+                                    ),
+                                    SizedBox(width: 4),
+                                    Text(
+                                      'BILL',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
                       );
                     },
                   ),

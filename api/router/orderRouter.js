@@ -7,6 +7,11 @@ require('../controller/orderController');
 
 const authenticate =     require('../middleware/authMiddleware'); 
 
+router.get(
+    '/qr/pending',
+    authenticate,
+    orderController.getPendingQROrders
+);
 
 router.post(
     '/:sourceOrderId/merge',
@@ -31,6 +36,13 @@ router.post(
 );
 
 router.get(     '/table/:tableId',     authenticate,     orderController.getTableOrder ); 
+
+router.post(
+    '/:orderId/request-bill',
+    authenticate,
+    orderController.requestBill
+);
+
 
 router.get(     '/:orderId',     authenticate,     orderController.getOrder ); 
 

@@ -11,6 +11,203 @@ const {
 } = require('./orderController');
 
 
+exports.startTableSessionByUuid = async (req, res) => {
+    const connection = await pool.getConnection();
+
+    try {
+        const tableUuid =
+            String(req.body.table_uuid || '').trim();
+
+        if (!tableUuid) {
+            return res.status(400).json({
+                success: false,
+                message: 'table_uuid is required'
+            });
+        }
+
+        await connection.beginTransaction();
+
+        // --------------------------------------------------
+        // 1. Find table by permanent QR UUID
+        // --------------------------------------------------
+
+        const [tables] = await connection.query(
+            `
+            SELECT
+                table_id,
+                table_uuid,
+                outlet_id,
+                table_code,
+                table_name,
+                capacity,
+                status,
+                is_active
+            FROM restaurant_table
+            WHERE table_uuid = ?
+              AND is_active = 1
+            LIMIT 1
+            FOR UPDATE
+            `,
+            [tableUuid]
+        );
+
+        if (tables.length === 0) {
+            await connection.rollback();
+
+            return res.status(404).json({
+                success: false,
+                message: 'Restaurant table not found'
+            });
+        }
+
+        const table = tables[0];
+
+        // --------------------------------------------------
+        // 2. Do not allow disabled table
+        // --------------------------------------------------
+
+        if (table.status === 'DISABLED') {
+            await connection.rollback();
+
+            return res.status(400).json({
+                success: false,
+                message: 'This table is currently disabled'
+            });
+        }
+
+        // --------------------------------------------------
+        // 3. Reuse existing ACTIVE table session
+        //
+        // Multiple customers at the same table must use
+        // the same table session.
+        // --------------------------------------------------
+
+        const [existing] = await connection.query(
+            `
+            SELECT
+                session_id,
+                session_uuid,
+                outlet_id,
+                table_id,
+                session_token,
+                status,
+                started_at,
+                expires_at
+            FROM table_order_session
+            WHERE outlet_id = ?
+              AND table_id = ?
+              AND status = 'ACTIVE'
+            ORDER BY session_id DESC
+            LIMIT 1
+            FOR UPDATE
+            `,
+            [
+                table.outlet_id,
+                table.table_id
+            ]
+        );
+
+        if (existing.length > 0) {
+            await connection.commit();
+
+            return res.json({
+                success: true,
+                existing: true,
+
+                session: existing[0],
+
+                table: {
+                    table_id: table.table_id,
+                    table_uuid: table.table_uuid,
+                    table_code: table.table_code,
+                    table_name: table.table_name,
+                    capacity: table.capacity
+                }
+            });
+        }
+
+        // --------------------------------------------------
+        // 4. Create new table session
+        // --------------------------------------------------
+
+        const sessionUuid =
+            crypto.randomUUID();
+
+        const sessionToken =
+            generateSessionToken();
+
+        const [result] = await connection.query(
+            `
+            INSERT INTO table_order_session
+            (
+                session_uuid,
+                outlet_id,
+                table_id,
+                session_token,
+                status
+            )
+            VALUES
+            (
+                ?,
+                ?,
+                ?,
+                ?,
+                'ACTIVE'
+            )
+            `,
+            [
+                sessionUuid,
+                table.outlet_id,
+                table.table_id,
+                sessionToken
+            ]
+        );
+
+        await connection.commit();
+
+        return res.status(201).json({
+            success: true,
+            existing: false,
+
+            session: {
+                session_id: result.insertId,
+                session_uuid: sessionUuid,
+                outlet_id: table.outlet_id,
+                table_id: table.table_id,
+                session_token: sessionToken,
+                status: 'ACTIVE'
+            },
+
+            table: {
+                table_id: table.table_id,
+                table_uuid: table.table_uuid,
+                table_code: table.table_code,
+                table_name: table.table_name,
+                capacity: table.capacity
+            }
+        });
+
+    } catch (error) {
+
+        try {
+            await connection.rollback();
+        } catch (_) {}
+
+        console.error(
+            'startTableSessionByUuid error:',
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to start table session'
+        });
+
+    } finally {
+        connection.release();
+    }
+};
+
 function generateSessionToken() {
     return crypto.randomBytes(32).toString('hex');
 }
@@ -148,6 +345,377 @@ function generateSessionToken() {
         connection.release();
     }
 };
+
+
+// ============================================================
+// GET TABLES FOR QR GENERATION
+//
+// GET /customer-order/admin/qr-tables?outletId=1
+//
+// POS/operator use only.
+// Returns active restaurant tables and their permanent
+// QR tokens. The token never changes when a dining session
+// is opened/closed.
+// ============================================================
+
+exports.getQrTables = async (req, res) => {
+
+    const connection = await pool.getConnection();
+
+    try {
+
+        const outletId = Number(req.query.outletId);
+
+        if (!outletId) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'outletId is required'
+            });
+        }
+
+        // --------------------------------------------------
+        // Verify user has access to the outlet
+        // --------------------------------------------------
+
+        const [access] = await connection.query(
+            `
+            SELECT 1
+            FROM user_outlet uo
+
+            INNER JOIN outlet o
+                ON o.outlet_id = uo.outlet_id
+
+            WHERE uo.user_id = ?
+              AND uo.outlet_id = ?
+              AND o.company_id = ?
+              AND o.is_active = TRUE
+
+            LIMIT 1
+            `,
+            [
+                req.user.userId,
+                outletId,
+                req.user.companyId
+            ]
+        );
+
+        if (access.length === 0) {
+
+            return res.status(403).json({
+                success: false,
+                message: 'You are not authorized for this outlet'
+            });
+        }
+
+        // --------------------------------------------------
+        // Get active restaurant tables
+        // --------------------------------------------------
+
+        const [tables] = await connection.query(
+            `
+            SELECT
+                table_id,
+                outlet_id,
+                table_uuid,
+                table_code,
+                table_name,
+                capacity,
+                qr_token,
+                status,
+                is_active
+
+            FROM restaurant_table
+
+            WHERE outlet_id = ?
+              AND is_active = TRUE
+
+            ORDER BY table_code
+            `,
+            [outletId]
+        );
+
+        return res.json({
+
+            success: true,
+
+            outletId,
+
+            count: tables.length,
+
+            tables: tables.map(table => ({
+                tableId: table.table_id,
+                outletId: table.outlet_id,
+                tableUUUid : table.table_uuid,
+                tableCode: table.table_code,
+                tableName: table.table_name,
+                capacity: table.capacity,
+                qrToken: table.qr_token,
+                status: table.status,
+                isActive: Boolean(table.is_active)
+            }))
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            'getQrTables error:',
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to get restaurant QR tables'
+        });
+
+    } finally {
+
+        connection.release();
+    }
+};
+
+// ============================================================
+// GET TABLE BY PERMANENT QR TOKEN
+//
+// GET /customer-order/qr/:token
+//
+// The permanent QR printed on the table contains this token.
+// This endpoint:
+//   1. Finds the restaurant table
+//   2. Finds the current ACTIVE table session
+//   3. Creates a new table session when none exists
+//
+// The permanent QR token itself never changes.
+// ============================================================
+
+exports.getTableByQrToken = async (req, res) => {
+
+    const connection = await pool.getConnection();
+
+    try {
+
+        const qrToken = req.params.token;
+
+        if (!qrToken) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid QR token'
+            });
+        }
+
+        await connection.beginTransaction();
+
+        // --------------------------------------------------
+        // 1. Find restaurant table using permanent QR token
+        // --------------------------------------------------
+
+        const [tables] = await connection.query(
+            `
+            SELECT
+                t.table_id,
+                t.outlet_id,
+                t.table_code,
+                t.table_name,
+                t.capacity,
+                t.status AS table_status,
+                t.qr_token,
+
+                o.outlet_name
+
+            FROM restaurant_table t
+
+            INNER JOIN outlet o
+                ON o.outlet_id = t.outlet_id
+
+            WHERE t.qr_token = ?
+              AND t.is_active = 1
+              AND o.is_active = 1
+
+            LIMIT 1
+
+            FOR UPDATE
+            `,
+            [qrToken]
+        );
+
+        if (tables.length === 0) {
+
+            await connection.rollback();
+
+            return res.status(404).json({
+                success: false,
+                message: 'Invalid or inactive restaurant QR'
+            });
+        }
+
+        const table = tables[0];
+
+        // --------------------------------------------------
+        // 2. Find existing ACTIVE table session
+        // --------------------------------------------------
+
+        const [sessions] = await connection.query(
+            `
+            SELECT
+                session_id,
+                session_uuid,
+                outlet_id,
+                table_id,
+                session_token,
+                status,
+                started_at,
+                expires_at
+            FROM table_order_session
+            WHERE outlet_id = ?
+              AND table_id = ?
+              AND status = 'ACTIVE'
+            ORDER BY session_id DESC
+            LIMIT 1
+            FOR UPDATE
+            `,
+            [
+                table.outlet_id,
+                table.table_id
+            ]
+        );
+
+        let session;
+
+        // --------------------------------------------------
+        // 3. Reuse existing active session
+        // --------------------------------------------------
+
+        if (sessions.length > 0) {
+
+            session = sessions[0];
+
+        } else {
+
+            // --------------------------------------------------
+            // 4. Create new table session
+            // --------------------------------------------------
+
+            const sessionUuid = crypto.randomUUID();
+            const sessionToken = generateSessionToken();
+
+            const [result] = await connection.query(
+                `
+                INSERT INTO table_order_session
+                (
+                    session_uuid,
+                    outlet_id,
+                    table_id,
+                    session_token,
+                    status
+                )
+                VALUES
+                (
+                    ?, ?, ?, ?, 'ACTIVE'
+                )
+                `,
+                [
+                    sessionUuid,
+                    table.outlet_id,
+                    table.table_id,
+                    sessionToken
+                ]
+            );
+
+            session = {
+                session_id: result.insertId,
+                session_uuid: sessionUuid,
+                outlet_id: table.outlet_id,
+                table_id: table.table_id,
+                session_token: sessionToken,
+                status: 'ACTIVE'
+            };
+        }
+
+        await connection.commit();
+
+        // --------------------------------------------------
+        // 5. Return table + active session
+        // --------------------------------------------------
+
+        return res.json({
+
+            success: true,
+
+            table: {
+                table_id:
+                    table.table_id,
+
+                outlet_id:
+                    table.outlet_id,
+
+                table_code:
+                    table.table_code,
+
+                table_name:
+                    table.table_name,
+
+                capacity:
+                    table.capacity,
+
+                table_status:
+                    table.table_status,
+
+                outlet_name:
+                    table.outlet_name
+            },
+
+            session: {
+                session_id:
+                    session.session_id,
+
+                session_uuid:
+                    session.session_uuid,
+
+                outlet_id:
+                    session.outlet_id,
+
+                table_id:
+                    session.table_id,
+
+                session_token:
+                    session.session_token,
+
+                status:
+                    session.status,
+
+                started_at:
+                    session.started_at || null,
+
+                expires_at:
+                    session.expires_at || null
+            }
+
+        });
+
+    } catch (error) {
+
+        try {
+            await connection.rollback();
+        } catch (_) {}
+
+        console.error(
+            'getTableByQrToken error:',
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to resolve restaurant QR'
+        });
+
+    } finally {
+
+        connection.release();
+    }
+};
+
 
 exports.getTableByToken = async (req, res) => {
      const connection = await pool.getConnection();
@@ -1960,21 +2528,39 @@ exports.getCustomerOrderStatus = async (req, res) => {
                 SELECT
                     oi.order_item_id,
                     oi.line_no,
-
+                        
                     oi.menu_item_id,
                     oi.variant_id,
-
+                        
                     oi.item_name,
                     oi.variant_name,
-
+                        
                     oi.qty,
-                    oi.status,
+                        
+                    oi.status AS order_item_status,
+                        
+                    CASE
+                        WHEN ki.kot_item_id IS NULL
+                            THEN oi.status
+                        
+                        WHEN k.status = 'ACCEPTED'
+                            THEN 'ACCEPTED'
+                        
+                        ELSE ki.status
+                    END AS status,
+                        
                     oi.special_instruction
-
+                        
                 FROM order_item oi
-
+                        
+                LEFT JOIN kot_item ki
+                    ON ki.order_item_id = oi.order_item_id
+                        
+                LEFT JOIN kot k
+                    ON k.kot_id = ki.kot_id
+                        
                 WHERE oi.order_id = ?
-
+                        
                 ORDER BY oi.line_no
                 `,
                 [order.order_id]
@@ -2035,6 +2621,9 @@ exports.getCustomerOrderStatus = async (req, res) => {
         connection.release();
     }
 };
+
+
+
 
 exports.requestBill = async (req, res) => {
 
@@ -2262,6 +2851,574 @@ exports.requestBill = async (req, res) => {
 
     } finally {
         connection.release();
+    }
+};
+
+
+// ============================================================
+// Get Customer Bill
+//
+// GET /customer-order/bill/:token/:orderId
+//
+// Customer-safe endpoint.
+// No POS authentication is required.
+//
+// The customer session token + orderId together determine
+// whether the customer is allowed to see the bill.
+// ============================================================
+
+exports.getCustomerBill = async (req, res) => {
+
+    const connection = await pool.getConnection();
+
+    try {
+
+        const customerSessionToken =
+            req.params.token;
+
+        const orderId =
+            Number(req.params.orderId);
+
+        // --------------------------------------------------
+        // 1. Basic validation
+        // --------------------------------------------------
+
+        if (!customerSessionToken) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'Customer session token is required'
+            });
+
+        }
+
+        if (!orderId || orderId <= 0) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'Valid orderId is required'
+            });
+
+        }
+
+        // --------------------------------------------------
+        // 2. Validate customer session
+        // --------------------------------------------------
+
+        const [sessions] =
+            await connection.query(
+                `
+                SELECT
+                    cs.customer_session_id,
+                    cs.customer_name,
+                    cs.customer_phone,
+                    cs.table_session_id,
+
+                    ts.outlet_id,
+                    ts.table_id,
+                    ts.status AS table_session_status,
+
+                    rt.table_code,
+                    rt.table_name
+
+                FROM customer_order_session cs
+
+                INNER JOIN table_order_session ts
+                    ON ts.session_id =
+                       cs.table_session_id
+
+                LEFT JOIN restaurant_table rt
+                    ON rt.table_id =
+                       ts.table_id
+
+                WHERE cs.session_token = ?
+
+                  AND cs.status = 'ACTIVE'
+
+                LIMIT 1
+                `,
+                [
+                    customerSessionToken
+                ]
+            );
+
+        if (sessions.length === 0) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    'Customer session is invalid or expired'
+            });
+
+        }
+
+        const session =
+            sessions[0];
+
+        // --------------------------------------------------
+        // 3. Validate table session
+        // --------------------------------------------------
+
+        if (
+            session.table_session_status !==
+            'ACTIVE'
+        ) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    'This table session is no longer active'
+            });
+
+        }
+
+        // --------------------------------------------------
+        // 4. Validate customer's order
+        // --------------------------------------------------
+
+        const [orders] =
+            await connection.query(
+                `
+                SELECT
+                    o.order_id,
+                    o.order_no,
+                    o.order_status,
+
+                    o.outlet_id,
+                    o.table_id,
+                    o.logical_table_id,
+
+                    o.subtotal,
+                    o.item_discount,
+                    o.bill_discount,
+                    o.taxable_amount,
+                    o.tax_amount,
+                    o.rounding_amount,
+
+                    o.grand_total,
+                    o.paid_amount,
+                    o.balance_amount,
+
+                    o.remarks,
+
+                    o.bill_requested,
+                    o.bill_requested_at
+
+                FROM orders o
+
+                WHERE o.order_id = ?
+
+                  AND o.customer_session_id = ?
+                  AND o.table_session_id = ?
+                  AND o.outlet_id = ?
+
+                LIMIT 1
+                `,
+                [
+                    orderId,
+                    session.customer_session_id,
+                    session.table_session_id,
+                    session.outlet_id
+                ]
+            );
+
+        if (orders.length === 0) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    'Order not found for this customer session'
+            });
+
+        }
+
+        const order =
+            orders[0];
+
+        // --------------------------------------------------
+        // 5. Find bill for this order
+        // --------------------------------------------------
+
+        const [bills] =
+            await connection.query(
+                `
+                SELECT
+                    bill_id,
+                    bill_uuid,
+
+                    bill_no,
+                    bill_date,
+                    bill_time,
+
+                    bill_type,
+                    bill_status,
+
+                    subtotal,
+                    item_discount,
+                    bill_discount,
+                    taxable_amount,
+                    tax_amount,
+                    rounding_amount,
+
+                    grand_total,
+                    paid_amount,
+                    balance_amount,
+
+                    remarks
+
+                FROM bill
+
+                WHERE order_id = ?
+
+                  AND bill_status NOT IN
+                  (
+                      'CANCELLED',
+                      'VOID',
+                      'REFUNDED'
+                  )
+
+                ORDER BY bill_id DESC
+
+                LIMIT 1
+                `,
+                [
+                    orderId
+                ]
+            );
+
+        // --------------------------------------------------
+        // Bill not created yet
+        // --------------------------------------------------
+
+        if (bills.length === 0) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    'Bill has not been generated yet'
+            });
+
+        }
+
+        const bill =
+            bills[0];
+
+        // --------------------------------------------------
+        // 6. Bill items
+        // --------------------------------------------------
+
+        const [items] =
+            await connection.query(
+                `
+                SELECT
+                    bill_item_id,
+                    bill_id,
+                    order_item_id,
+
+                    menu_item_id,
+                    variant_id,
+
+                    item_name,
+                    variant_name,
+
+                    qty,
+                    rate,
+
+                    gross_amount,
+                    discount_amount,
+                    taxable_amount,
+                    tax_amount,
+                    net_amount
+
+                FROM bill_item
+
+                WHERE bill_id = ?
+
+                ORDER BY bill_item_id
+                `,
+                [
+                    bill.bill_id
+                ]
+            );
+
+        // --------------------------------------------------
+        // 7. Bill taxes
+        // --------------------------------------------------
+
+        const [taxes] =
+            await connection.query(
+                `
+                SELECT
+                    bill_tax_id,
+                    bill_id,
+
+                    tax_rate_id,
+                    tax_name,
+                    tax_type,
+                    rate,
+
+                    taxable_amount,
+                    tax_amount
+
+                FROM bill_tax
+
+                WHERE bill_id = ?
+
+                ORDER BY bill_tax_id
+                `,
+                [
+                    bill.bill_id
+                ]
+            );
+
+        // --------------------------------------------------
+        // 8. Bill discounts
+        // --------------------------------------------------
+
+        const [discounts] =
+            await connection.query(
+                `
+                SELECT
+                    bill_discount_id,
+                    bill_id,
+
+                    discount_name,
+                    discount_type,
+                    discount_value,
+                    discount_amount
+
+                FROM bill_discount
+
+                WHERE bill_id = ?
+
+                ORDER BY bill_discount_id
+                `,
+                [
+                    bill.bill_id
+                ]
+            );
+
+        // --------------------------------------------------
+        // 9. Successful payments
+        //
+        // We expose only customer-relevant information.
+        // Internal received_by/user details are not exposed.
+        // --------------------------------------------------
+
+        const [payments] =
+            await connection.query(
+                `
+                SELECT
+                    payment_id,
+                    bill_id,
+                    payment_uuid,
+                    payment_date,
+                    payment_mode,
+                    amount,
+                    reference_no,
+                    remarks,
+                    status
+
+                FROM bill_payment
+
+                WHERE bill_id = ?
+
+                  AND status = 'SUCCESS'
+
+                ORDER BY payment_id
+                `,
+                [
+                    bill.bill_id
+                ]
+            );
+
+        // --------------------------------------------------
+        // 10. Update customer activity
+        // --------------------------------------------------
+
+        await connection.query(
+            `
+            UPDATE customer_order_session
+
+            SET
+                last_activity_at =
+                    CURRENT_TIMESTAMP
+
+            WHERE customer_session_id = ?
+            `,
+            [
+                session.customer_session_id
+            ]
+        );
+
+        // --------------------------------------------------
+        // 11. Return customer-safe bill
+        // --------------------------------------------------
+
+        return res.json({
+
+            success: true,
+
+            customer_session: {
+
+                customer_session_id:
+                    session.customer_session_id,
+
+                customer_name:
+                    session.customer_name,
+
+                customer_phone:
+                    session.customer_phone
+
+            },
+
+            table: {
+
+                table_id:
+                    session.table_id,
+
+                table_code:
+                    session.table_code,
+
+                table_name:
+                    session.table_name
+
+            },
+
+            order: {
+
+                order_id:
+                    order.order_id,
+
+                order_no:
+                    order.order_no,
+
+                order_status:
+                    order.order_status,
+
+                table_id:
+                    order.table_id,
+
+                logical_table_id:
+                    order.logical_table_id,
+
+                subtotal:
+                    order.subtotal,
+
+                item_discount:
+                    order.item_discount,
+
+                bill_discount:
+                    order.bill_discount,
+
+                taxable_amount:
+                    order.taxable_amount,
+
+                tax_amount:
+                    order.tax_amount,
+
+                rounding_amount:
+                    order.rounding_amount,
+
+                grand_total:
+                    order.grand_total,
+
+                paid_amount:
+                    order.paid_amount,
+
+                balance_amount:
+                    order.balance_amount,
+
+                bill_requested:
+                    order.bill_requested,
+
+                bill_requested_at:
+                    order.bill_requested_at
+
+            },
+
+            bill: {
+
+                bill_id:
+                    bill.bill_id,
+
+                bill_uuid:
+                    bill.bill_uuid,
+
+                bill_no:
+                    bill.bill_no,
+
+                bill_date:
+                    bill.bill_date,
+
+                bill_time:
+                    bill.bill_time,
+
+                bill_type:
+                    bill.bill_type,
+
+                bill_status:
+                    bill.bill_status,
+
+                subtotal:
+                    bill.subtotal,
+
+                item_discount:
+                    bill.item_discount,
+
+                bill_discount:
+                    bill.bill_discount,
+
+                taxable_amount:
+                    bill.taxable_amount,
+
+                tax_amount:
+                    bill.tax_amount,
+
+                rounding_amount:
+                    bill.rounding_amount,
+
+                grand_total:
+                    bill.grand_total,
+
+                paid_amount:
+                    bill.paid_amount,
+
+                balance_amount:
+                    bill.balance_amount,
+
+                remarks:
+                    bill.remarks,
+
+                items,
+
+                taxes,
+
+                discounts,
+
+                payments
+
+            }
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            'getCustomerBill error:',
+            error
+        );
+
+        return res.status(500).json({
+            success: false,
+            message:
+                'Unable to get customer bill'
+        });
+
+    } finally {
+
+        connection.release();
+
     }
 };
 

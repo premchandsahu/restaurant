@@ -1,5 +1,15 @@
 import 'package:flutter/material.dart';
-
+import 'package:restapp/models/inventory/inventory_supplier.dart';
+import 'package:restapp/screens/inventory/inventory_category_master_screen.dart';
+import 'package:restapp/screens/inventory/inventory_supplier_master_screen.dart';
+import 'package:restapp/screens/inventory/inventory_unit_master_screen.dart';
+import 'package:restapp/screens/pos/menu_category_master_screen.dart';
+import 'package:restapp/screens/pos/menu_item_master_screen.dart';
+import 'package:restapp/screens/pos/tax_master_screen.dart';
+import 'package:restapp/services/pos/pos_order_service.dart';
+import 'dart:async';
+import 'package:restapp/screens/pos/restaurant_table_qr_screen.dart';
+import 'bill_requests_screen.dart';
 import 'package:restapp/models/auth/app_menu.dart';
 import 'package:restapp/screens/hotel/hotel_housekeeping_history_screen.dart';
 import 'package:restapp/screens/hotel/hotel_housekeeping_screen.dart';
@@ -24,7 +34,7 @@ import 'package:restapp/screens/hotel/hotel_reservation_screen.dart';
 import 'pending_bills_screen.dart';
 import 'pos_order_screen.dart';
 
-class PosMainMenuScreen extends StatelessWidget {
+class PosMainMenuScreen extends StatefulWidget {
   final int outletId;
   final ApiClient apiClient;
 
@@ -42,35 +52,90 @@ class PosMainMenuScreen extends StatelessWidget {
     required this.permissions,
   });
 
-  // ------------------------------------------------------------
-  // PERMISSION CHECK
-  // ------------------------------------------------------------
+  @override
+  State<PosMainMenuScreen> createState() => _PosMainMenuScreenState();
+}
 
-  bool hasPermission(String permission) {
-    return permissions.contains(permission);
+class _PosMainMenuScreenState extends State<PosMainMenuScreen> {
+  Timer? _billRequestTimer;
+
+  int _billRequestCount = 0;
+
+  late final PosOrderService _orderService;
+  Future<void> _loadBillRequestCount() async {
+    try {
+      final requests = await _orderService.getBillRequests(
+        outletId: widget.outletId,
+      );
+
+      if (!mounted) return;
+
+      setState(() {
+        _billRequestCount = requests.length;
+      });
+    } catch (e) {
+      debugPrint('Bill request notification error: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    _billRequestTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    _orderService = PosOrderService(
+      baseUrl: widget.apiClient.baseUrl,
+      token: widget.apiClient.token ?? '',
+    );
+
+    _loadBillRequestCount();
+
+    _billRequestTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _loadBillRequestCount(),
+    );
+  }
+
+  void _openBillRequests() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BillRequestsScreen(
+          outletId: widget.outletId,
+          baseUrl: widget.apiClient.baseUrl,
+          token: widget.apiClient.token ?? '',
+        ),
+      ),
+    );
+
+    _loadBillRequestCount();
   }
 
   // ------------------------------------------------------------
-  // PENDING BILLS
-  // ------------------------------------------------------------
+  bool hasPermission(String permission) {
+    return widget.permissions.contains(permission);
+  }
 
+  // ------------------------------------------------------------
   void _openPendingBills(BuildContext context) {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => PendingBillsScreen(
-          outletId: outletId,
-          baseUrl: apiClient.baseUrl,
-          token: apiClient.token ?? "",
+          outletId: widget.outletId,
+          baseUrl: widget.apiClient.baseUrl,
+          token: widget.apiClient.token ?? "",
         ),
       ),
     );
   }
 
   // ------------------------------------------------------------
-  // HOTEL FOLIO
-  // ------------------------------------------------------------
-
   void _openHotelFolio(BuildContext context) {
     Navigator.push(
       context,
@@ -80,8 +145,8 @@ class PosMainMenuScreen extends StatelessWidget {
           // We will replace this with stay selection
           // when the Hotel In-House/Folio screen is created.
           stayId: 2,
-          baseUrl: apiClient.baseUrl,
-          token: apiClient.token ?? "",
+          baseUrl: widget.apiClient.baseUrl,
+          token: widget.apiClient.token ?? "",
         ),
       ),
     );
@@ -95,9 +160,9 @@ class PosMainMenuScreen extends StatelessWidget {
           // Temporary test stay.
           // We will replace this with stay selection
           // when the Hotel In-House/Folio screen is created.
-          outletId: outletId,
-          baseUrl: apiClient.baseUrl,
-          token: apiClient.token ?? "",
+          outletId: widget.outletId,
+          baseUrl: widget.apiClient.baseUrl,
+          token: widget.apiClient.token ?? "",
         ),
       ),
     );
@@ -111,9 +176,9 @@ class PosMainMenuScreen extends StatelessWidget {
           // Temporary test stay.
           // We will replace this with stay selection
           // when the Hotel In-House/Folio screen is created.
-          outletId: outletId,
-          baseUrl: apiClient.baseUrl,
-          token: apiClient.token ?? "",
+          outletId: widget.outletId,
+          baseUrl: widget.apiClient.baseUrl,
+          token: widget.apiClient.token ?? "",
         ),
       ),
     );
@@ -124,18 +189,15 @@ class PosMainMenuScreen extends StatelessWidget {
       context,
       MaterialPageRoute(
         builder: (_) => InventoryRecipeScreen(
-          outletId: outletId,
-          baseUrl: apiClient.baseUrl,
-          token: apiClient.token ?? '',
+          outletId: widget.outletId,
+          baseUrl: widget.apiClient.baseUrl,
+          token: widget.apiClient.token ?? '',
         ),
       ),
     );
   }
 
   // ------------------------------------------------------------
-  // MESSAGE
-  // ------------------------------------------------------------
-
   void _showMessage(BuildContext context, String message) {
     ScaffoldMessenger.of(
       context,
@@ -143,13 +205,50 @@ class PosMainMenuScreen extends StatelessWidget {
   }
 
   // ------------------------------------------------------------
-  // BUILD
-  // ------------------------------------------------------------
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Restaurant POS')),
+      appBar: AppBar(
+        title: const Text('Restaurant POS'),
+        actions: [
+          Stack(
+            clipBehavior: Clip.none,
+            children: [
+              IconButton(
+                tooltip: 'Bill Requests',
+                onPressed: _openBillRequests,
+                icon: const Icon(Icons.notifications_outlined),
+              ),
+
+              if (_billRequestCount > 0)
+                Positioned(
+                  right: 4,
+                  top: 4,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 6,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      _billRequestCount > 99
+                          ? '99+'
+                          : _billRequestCount.toString(),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
 
       body: LayoutBuilder(
         builder: (context, constraints) {
@@ -182,9 +281,6 @@ class PosMainMenuScreen extends StatelessWidget {
   }
 
   // ------------------------------------------------------------
-  // HEADER
-  // ------------------------------------------------------------
-
   Widget _buildHeader(BuildContext context) {
     return Card(
       child: Padding(
@@ -252,8 +348,85 @@ class PosMainMenuScreen extends StatelessWidget {
       case 'RESTAURANT_TABLES':
         Navigator.of(context).push(
           MaterialPageRoute(
-            builder: (_) =>
-                RestaurantTableScreen(outletId: outletId, apiClient: apiClient),
+            builder: (_) => RestaurantTableScreen(
+              outletId: widget.outletId,
+              apiClient: widget.apiClient,
+            ),
+          ),
+        );
+        break;
+      case 'RESTAURANT_TABLE_QR':
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => RestaurantTableQrScreen(
+              outletId: widget.outletId,
+              apiClient: widget.apiClient,
+            ),
+          ),
+        );
+        break;
+      case 'MASTER_MENU_ITEMS':
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => MenuItemMasterScreen(
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? "",
+            ),
+          ),
+        );
+        break;
+
+      case 'MASTER_MENU_CATEGORIES':
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => MenuCategoryMasterScreen(
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
+            ),
+          ),
+        );
+        break;
+      case 'MASTER_SUPPLIERS':
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => InventorySupplierMasterScreen(
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
+            ),
+          ),
+        );
+        break;
+      case 'MASTER_UNITS':
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => InventoryUnitMasterScreen(
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
+            ),
+          ),
+        );
+        break;
+      case 'MASTER_INVENTORY_CATEGORIES':
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => InventoryCategoryMasterScreen(
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
+            ),
+          ),
+        );
+        break;
+
+      case 'MASTER_TAX_GROUPS':
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => TaxMasterScreen(
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
+            ),
           ),
         );
         break;
@@ -262,8 +435,8 @@ class PosMainMenuScreen extends StatelessWidget {
           context,
           MaterialPageRoute(
             builder: (_) => HotelReservationScreen(
-              outletId: outletId,
-              apiClient: apiClient,
+              outletId: widget.outletId,
+              apiClient: widget.apiClient,
             ),
           ),
         );
@@ -273,9 +446,9 @@ class PosMainMenuScreen extends StatelessWidget {
           context,
           MaterialPageRoute(
             builder: (_) => InventoryPurchaseListScreen(
-              outletId: outletId,
-              baseUrl: apiClient.baseUrl,
-              token: apiClient.token ?? '',
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
             ),
           ),
         );
@@ -286,9 +459,9 @@ class PosMainMenuScreen extends StatelessWidget {
           context,
           MaterialPageRoute(
             builder: (_) => InventoryRawMaterialScreen(
-              outletId: outletId,
-              baseUrl: apiClient.baseUrl,
-              token: apiClient.token ?? '',
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
             ),
           ),
         );
@@ -298,8 +471,22 @@ class PosMainMenuScreen extends StatelessWidget {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) =>
-                HotelInhouseScreen(outletId: outletId, apiClient: apiClient),
+            builder: (_) => HotelInhouseScreen(
+              outletId: widget.outletId,
+              apiClient: widget.apiClient,
+            ),
+          ),
+        );
+        break;
+      case 'RESTAURANT_CUSTOMERS':
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => CustomerOrderStatusScreen(
+              customerSessionToken:
+                  "7769a885c4ca0c07e7fd27e55f76c02866258aa91029fd2fe775a2b18c023fe1",
+              baseUrl: widget.apiClient.baseUrl,
+            ),
           ),
         );
         break;
@@ -307,16 +494,20 @@ class PosMainMenuScreen extends StatelessWidget {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) =>
-                PosBillHistoryScreen(outletId: outletId, apiClient: apiClient),
+            builder: (_) => PosBillHistoryScreen(
+              outletId: widget.outletId,
+              apiClient: widget.apiClient,
+            ),
           ),
         );
         break;
       case 'RESTAURANT_NEW_ORDER':
         Navigator.of(context).push(
           MaterialPageRoute(
-            builder: (_) =>
-                RestaurantTableScreen(outletId: outletId, apiClient: apiClient),
+            builder: (_) => RestaurantTableScreen(
+              outletId: widget.outletId,
+              apiClient: widget.apiClient,
+            ),
           ),
         );
         break;
@@ -325,9 +516,9 @@ class PosMainMenuScreen extends StatelessWidget {
           context,
           MaterialPageRoute(
             builder: (_) => InventorySupplierPaymentListScreen(
-              outletId: outletId,
-              baseUrl: apiClient.baseUrl,
-              token: apiClient.token ?? '',
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
             ),
           ),
         );
@@ -337,9 +528,9 @@ class PosMainMenuScreen extends StatelessWidget {
           context,
           MaterialPageRoute(
             builder: (_) => InventoryStockBalanceScreen(
-              outletId: outletId,
-              baseUrl: apiClient.baseUrl,
-              token: apiClient.token ?? '',
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
             ),
           ),
         );
@@ -349,9 +540,9 @@ class PosMainMenuScreen extends StatelessWidget {
           context,
           MaterialPageRoute(
             builder: (_) => InventoryStockLedgerScreen(
-              outletId: outletId,
-              baseUrl: apiClient.baseUrl,
-              token: apiClient.token ?? '',
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
             ),
           ),
         );
@@ -362,9 +553,9 @@ class PosMainMenuScreen extends StatelessWidget {
           context,
           MaterialPageRoute(
             builder: (_) => InventoryStockAdjustmentListScreen(
-              outletId: outletId,
-              baseUrl: apiClient.baseUrl,
-              token: apiClient.token ?? '',
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
             ),
           ),
         );
@@ -374,9 +565,9 @@ class PosMainMenuScreen extends StatelessWidget {
           context,
           MaterialPageRoute(
             builder: (_) => InventorySupplierLedgerScreen(
-              outletId: outletId,
-              baseUrl: apiClient.baseUrl,
-              token: apiClient.token ?? '',
+              outletId: widget.outletId,
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
             ),
           ),
         );
@@ -384,8 +575,10 @@ class PosMainMenuScreen extends StatelessWidget {
       case 'RESTAURANT_OPEN_ORDERS':
         Navigator.of(context).push(
           MaterialPageRoute(
-            builder: (_) =>
-                RestaurantTableScreen(outletId: outletId, apiClient: apiClient),
+            builder: (_) => RestaurantTableScreen(
+              outletId: widget.outletId,
+              apiClient: widget.apiClient,
+            ),
           ),
         );
         break;
@@ -410,8 +603,8 @@ class PosMainMenuScreen extends StatelessWidget {
         Navigator.of(context).push(
           MaterialPageRoute(
             builder: (_) => KitchenDisplayScreen(
-              baseUrl: apiClient.baseUrl,
-              token: apiClient.token ?? '',
+              baseUrl: widget.apiClient.baseUrl,
+              token: widget.apiClient.token ?? '',
             ),
           ),
         );
@@ -429,7 +622,8 @@ class PosMainMenuScreen extends StatelessWidget {
     switch (iconName) {
       case 'restaurant':
         return Icons.restaurant;
-
+      case 'qr_code':
+        return Icons.qr_code;
       case 'table_restaurant':
         return Icons.table_restaurant;
 
@@ -481,9 +675,6 @@ class PosMainMenuScreen extends StatelessWidget {
   }
 
   // ------------------------------------------------------------
-  // MENU GRID
-  // ------------------------------------------------------------
-
   Widget _buildMenuGrid(BuildContext context, bool isDesktop) {
     final crossAxisCount = isDesktop ? 4 : 2;
 
@@ -492,7 +683,7 @@ class PosMainMenuScreen extends StatelessWidget {
     // used as sections and are not displayed as cards.
     final List<AppMenu> menuItems = [];
 
-    for (final group in menus) {
+    for (final group in widget.menus) {
       if (!group.isGroup) {
         menuItems.add(group);
         continue;
@@ -558,10 +749,8 @@ class PosMainMenuScreen extends StatelessWidget {
       }).toList(),
     );
   }
-  // ------------------------------------------------------------
-  // MENU CARD
-  // ------------------------------------------------------------
 
+  // ------------------------------------------------------------
   Widget _menuCard(
     BuildContext context, {
     required IconData icon,

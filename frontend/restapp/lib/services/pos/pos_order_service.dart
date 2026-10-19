@@ -367,6 +367,65 @@ class PosOrderService {
         .toList();
   }
 
+  Future<List<Map<String, dynamic>>> getBillRequests({
+    required int outletId,
+  }) async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/bills/requests?outletId=$outletId'),
+      headers: _headers,
+    );
+
+    debugPrint('GET BILL REQUESTS RESPONSE: ${response.body}');
+
+    final data = jsonDecode(response.body);
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(data['message'] ?? 'Unable to load bill requests');
+    }
+
+    if (data['success'] != true) {
+      throw Exception(data['message'] ?? 'Unable to load bill requests');
+    }
+
+    final List<dynamic> rows = data['requests'] ?? [];
+
+    return rows.map((row) => Map<String, dynamic>.from(row as Map)).toList();
+  }
+
+  // --------------------------------------------------
+  // Get pending QR orders
+  //
+  // Returns QR orders having OPEN order items which
+  // have not yet been sent to kitchen.
+  //
+  // This is incremental:
+  //   First QR order  -> pending
+  //   SEND TO KITCHEN -> pending cleared
+  //   Customer adds more items -> pending again
+  // --------------------------------------------------
+
+  Future<List<Map<String, dynamic>>> getPendingQROrders({
+    required int outletId,
+  }) async {
+    final uri = Uri.parse(
+      '$baseUrl/orders/qr/pending'
+      '?outletId=$outletId',
+    );
+
+    final response = await http.get(uri, headers: _headers);
+
+    debugPrint('PENDING QR ORDERS RESPONSE: ${response.body}');
+
+    final data = jsonDecode(response.body);
+
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception(data['message'] ?? 'Unable to get pending QR orders');
+    }
+
+    final orders = data['pendingOrders'] as List? ?? [];
+
+    return orders.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
   // --------------------------------------------------
   // Get current table order
   // --------------------------------------------------

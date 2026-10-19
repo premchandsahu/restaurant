@@ -33,6 +33,17 @@ router.get(
     inventoryController.getUnits
 );
 
+router.post(
+    '/units',
+    authenticate,
+    inventoryController.createUnit
+);
+
+router.put(
+    '/units/:unitId',
+    authenticate,
+    inventoryController.updateUnit
+);
 
 // ============================================================
 // INVENTORY CATEGORIES
@@ -42,6 +53,19 @@ router.get(
     '/categories',
     authenticate,
     inventoryController.getCategories
+);
+
+
+router.post(
+    '/categories',
+    authenticate,
+    inventoryController.createInventoryCategory
+);
+
+router.put(
+    '/categories/:categoryId',
+    authenticate,
+    inventoryController.updateInventoryCategory
 );
 
 

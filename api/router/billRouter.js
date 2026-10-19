@@ -26,7 +26,11 @@ router.get(
 );
 
 
-
+router.get(
+    '/requests',
+    authenticate,
+    billController.getBillRequests
+);
 // ============================================================
 // Bill History
 // ============================================================

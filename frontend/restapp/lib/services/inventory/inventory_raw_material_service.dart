@@ -209,6 +209,85 @@ class InventoryRawMaterialService {
         .toList();
   }
 
+  Future<void> createInventoryCategory({
+    required Map<String, dynamic> payload,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/inventory/categories'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode(payload),
+    );
+    _throwIfCategoryMutationFailed(response);
+  }
+
+  Future<void> updateInventoryCategory({
+    required int categoryId,
+    required Map<String, dynamic> payload,
+  }) async {
+    final response = await http.put(
+      Uri.parse('$baseUrl/inventory/categories/$categoryId'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': 'Bearer $token',
+      },
+      body: jsonEncode(payload),
+    );
+    _throwIfCategoryMutationFailed(response);
+  }
+
+  void _throwIfCategoryMutationFailed(http.Response response) {
+    dynamic data;
+    try {
+      data = jsonDecode(response.body);
+    } catch (_) {
+      throw Exception(
+        response.body.trim().isNotEmpty ? response.body : 'Request failed',
+      );
+    }
+
+    final success = data is Map && data['success'] == true;
+    if (response.statusCode < 200 || response.statusCode >= 300 || !success) {
+      final message = data is Map ? data['message']?.toString() : null;
+      throw Exception(message?.isNotEmpty == true ? message : 'Request failed');
+    }
+  }
+
+  Future<InventoryUnit> createUnit({
+    required Map<String, dynamic> payload,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/inventory/units'),
+      headers: _headers,
+      body: jsonEncode(payload),
+    );
+
+    final data = _decode(response);
+    _throwIfFailed(response, data);
+
+    return InventoryUnit.fromJson(
+      Map<String, dynamic>.from(data['unit'] as Map),
+    );
+  }
+
+  Future<void> updateUnit({
+    required int unitId,
+    required Map<String, dynamic> payload,
+  }) async {
+    final response = await http.put(
+      Uri.parse('$baseUrl/inventory/units/$unitId'),
+      headers: _headers,
+      body: jsonEncode(payload),
+    );
+
+    final data = _decode(response);
+    _throwIfFailed(response, data);
+  }
+
   // ============================================================
   // HELPERS
   // ============================================================

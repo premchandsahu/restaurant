@@ -41,10 +41,13 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   late final PosMenuService _menuService;
   late final PosTaxService _taxService;
   late final PosOrderService _orderService;
+
   bool _creatingBill = false;
   int? _orderId;
   String _orderType = 'DINE_IN';
-
+  final TextEditingController _menuSearchController = TextEditingController();
+  bool get _isOrderBilled => _orderStatus == 'BILLED';
+  String _menuSearchText = '';
   int _guestCount = 1;
   String? _logicalTableCode;
   String? _logicalTableName;
@@ -60,6 +63,37 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   bool _loadingItems = false;
 
   String? _errorMessage;
+
+  bool get _hasUnsavedItemChanges {
+    return _cartItems.any((item) => item.unsavedQuantity > 0);
+  }
+
+  bool get _hasItemsPendingKOT {
+    return _cartItems.any((item) => item.quantity > item.sentQuantity);
+  }
+
+  bool matchesMenuSearch(String itemName, String searchText) {
+    final queryWords = searchText
+        .toLowerCase()
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((word) => word.isNotEmpty)
+        .toList();
+
+    if (queryWords.isEmpty) {
+      return true;
+    }
+
+    final itemWords = itemName
+        .toLowerCase()
+        .split(RegExp(r'[\s\-_/,()]+'))
+        .where((word) => word.isNotEmpty)
+        .toList();
+
+    return queryWords.every(
+      (queryWord) => itemWords.any((itemWord) => itemWord.contains(queryWord)),
+    );
+  }
 
   PosTaxGroup? _findTaxGroup(int? taxGroupId) {
     if (taxGroupId == null) {
@@ -267,6 +301,12 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   }
 
   @override
+  void dispose() {
+    _menuSearchController.dispose();
+    super.dispose();
+  }
+
+  @override
   void initState() {
     super.initState();
 
@@ -385,6 +425,13 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   }
 */
   Future<bool> _saveOrder({bool showMessage = true}) async {
+    if (_isOrderBilled) {
+      return false;
+    }
+    if (!_hasUnsavedItemChanges) {
+      return false;
+    }
+
     if (_savingOrder || _cartItems.isEmpty) {
       return false;
     }
@@ -758,13 +805,25 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
       return;
     }
 
+    if (_isOrderBilled) {
+      return;
+    }
+
+    if (!_hasItemsPendingKOT) {
+      return;
+    }
+
     // ----------------------------------------------
     // Save order first
     // ----------------------------------------------
+    if (_hasUnsavedItemChanges) {
+      final saved = await _saveOrder(showMessage: false);
 
-    final saved = await _saveOrder(showMessage: false);
-
-    if (!saved || _orderId == null) {
+      if (!saved || _orderId == null) {
+        return;
+      }
+    }
+    if (_orderId == null) {
       return;
     }
 
@@ -788,6 +847,14 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
 
       setState(() {
         _orderId = order.orderId;
+        _orderStatus = order.orderStatus;
+
+        // Everything currently in cart has now
+        // been sent to kitchen.
+        for (final item in _cartItems) {
+          item.sentQuantity = item.quantity;
+          item.isSentToKitchen = true;
+        }
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -821,6 +888,8 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   }
 
   void _addToCart(PosCartItem cartItem) {
+    if (_isOrderBilled) return;
+
     setState(() {
       final existingIndex = _cartItems.indexWhere(
         (existing) => existing.isSameConfiguration(
@@ -839,12 +908,16 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   }
 
   void _incrementCartItem(int index) {
+    if (_isOrderBilled) return;
+
     setState(() {
       _cartItems[index].quantity++;
     });
   }
 
   void _decrementCartItem(int index) {
+    if (_isOrderBilled) return;
+
     setState(() {
       final item = _cartItems[index];
 
@@ -857,6 +930,8 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   }
 
   void _deleteCartItem(int index) {
+    if (_isOrderBilled) return;
+
     setState(() {
       _cartItems.removeAt(index);
     });
@@ -882,24 +957,23 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
       setState(() {
         _categories = categories;
 
-        if (categories.isNotEmpty) {
-          _selectedCategoryId = categories.first.categoryId;
-        }
+        // ALL is selected by default
+        _selectedCategoryId = null;
+
+        // Category list is ready immediately
+        _loadingCategories = false;
       });
 
-      if (_selectedCategoryId != null) {
-        await _loadMenuItems(_selectedCategoryId!);
+      // Load ALL menu items in the background.
+      // Do not wait for this before displaying categories.
+      if (categories.isNotEmpty) {
+        _loadAllMenuItems();
       }
     } catch (e) {
       if (!mounted) return;
 
       setState(() {
         _errorMessage = e.toString();
-      });
-    } finally {
-      if (!mounted) return;
-
-      setState(() {
         _loadingCategories = false;
       });
     }
@@ -943,6 +1017,50 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
     }
   }
 
+  Future<void> _loadAllMenuItems() async {
+    if (!mounted) return;
+
+    setState(() {
+      _loadingItems = true;
+      _errorMessage = null;
+    });
+
+    try {
+      final items = await _menuService.getAllMenuItems(
+        outletId: widget.outletId,
+      );
+
+      // User may have selected another category
+      // while ALL items were loading.
+      if (!mounted || _selectedCategoryId != null) {
+        return;
+      }
+
+      items.sort(
+        (a, b) => a.itemName.toLowerCase().compareTo(b.itemName.toLowerCase()),
+      );
+
+      setState(() {
+        _menuItems = items;
+      });
+    } catch (e) {
+      if (!mounted || _selectedCategoryId != null) {
+        return;
+      }
+
+      setState(() {
+        _errorMessage = e.toString();
+        _menuItems = [];
+      });
+    } finally {
+      if (mounted && _selectedCategoryId == null) {
+        setState(() {
+          _loadingItems = false;
+        });
+      }
+    }
+  }
+
   // --------------------------------------------------
   // Category Selected
   // --------------------------------------------------
@@ -952,20 +1070,41 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
       return;
     }
 
+    _menuSearchController.clear();
+
     setState(() {
       _selectedCategoryId = category.categoryId;
-
+      _menuSearchText = '';
       _menuItems = [];
     });
 
     await _loadMenuItems(category.categoryId);
   }
 
+  Future<void> _onAllCategoriesSelected() async {
+    if (_selectedCategoryId == null) {
+      return;
+    }
+
+    _menuSearchController.clear();
+
+    setState(() {
+      _selectedCategoryId = null;
+      _menuSearchText = '';
+      _menuItems = [];
+    });
+
+    await _loadAllMenuItems();
+  }
   // --------------------------------------------------
   // Menu Item Selected
   // --------------------------------------------------
 
   Future<void> _onMenuItemSelected(PosMenuItem item) async {
+    if (_isOrderBilled) {
+      return;
+    }
+
     try {
       setState(() {
         _loadingItems = true;
@@ -1031,37 +1170,48 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
 
           child: PosCartPanel(
             items: _cartItems,
+
             orderType: _orderType,
             tableId: widget.tableId,
             guestCount: _guestCount,
 
-            onOrderTypeChanged: (value) {
-              if (value == null) return;
-              setState(() {
-                _orderType = value;
-              });
-            },
-
-            onGuestCountChanged: (value) {
-              setState(() {
-                _guestCount = value;
-              });
-            },
-
-            onIncrement: _incrementCartItem,
-
-            onDecrement: _decrementCartItem,
-
-            onDelete: _deleteCartItem,
-
-            onSendToKitchen: _savingOrder ? null : _sendToKitchen,
-            onSaveOrder: _savingOrder
+            onOrderTypeChanged: _isOrderBilled
                 ? null
-                : () async {
-                    await _saveOrder();
+                : (value) {
+                    if (value == null) return;
+
+                    setState(() {
+                      _orderType = value;
+                    });
                   },
-            onCreateBill: _creatingBill ? null : _createBill,
-            canCreateBill: true,
+
+            onGuestCountChanged: _isOrderBilled
+                ? null
+                : (value) {
+                    setState(() {
+                      _guestCount = value;
+                    });
+                  },
+
+            onIncrement: _isOrderBilled ? null : _incrementCartItem,
+
+            onDecrement: _isOrderBilled ? null : _decrementCartItem,
+
+            onDelete: _isOrderBilled ? null : _deleteCartItem,
+
+            onSendToKitchen: _sendToKitchen,
+
+            canSendToKitchen: !_isOrderBilled && _hasItemsPendingKOT,
+
+            onSaveOrder: () async {
+              await _saveOrder();
+            },
+
+            canSaveOrder: !_isOrderBilled && _hasUnsavedItemChanges,
+
+            onCreateBill: _createBill,
+
+            canCreateBill: !_isOrderBilled,
           ),
         ),
       ],
@@ -1071,7 +1221,7 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   // --------------------------------------------------
   // Category Panel
   // --------------------------------------------------
-
+  /*
   Widget _buildCategoryPanel() {
     if (_loadingCategories) {
       return const Center(child: CircularProgressIndicator());
@@ -1085,19 +1235,224 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
       onCategorySelected: _onCategorySelected,
     );
   }
+*/
 
+  Widget _buildCategoryPanel() {
+    if (_loadingCategories) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Container(
+      decoration: BoxDecoration(
+        color: colorScheme.surface,
+        border: Border(right: BorderSide(color: colorScheme.outlineVariant)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ---------------------------------------------
+          // Category heading
+          // ---------------------------------------------
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 12, 10),
+            child: Text(
+              'CATEGORIES',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.0,
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+
+          // ---------------------------------------------
+          // Category list
+          // ---------------------------------------------
+          Expanded(
+            child: ListView.builder(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              itemCount: _categories.length + 1,
+              itemBuilder: (context, index) {
+                // ---------------------------------------
+                // ALL
+                // ---------------------------------------
+                if (index == 0) {
+                  final selected = _selectedCategoryId == null;
+
+                  return _buildDesktopCategoryItem(
+                    label: 'ALL',
+                    selected: selected,
+                    colorScheme: colorScheme,
+                    onTap: _onAllCategoriesSelected,
+                  );
+                }
+
+                // ---------------------------------------
+                // Normal category
+                // ---------------------------------------
+                final category = _categories[index - 1];
+
+                final selected = category.categoryId == _selectedCategoryId;
+
+                return _buildDesktopCategoryItem(
+                  label: category.categoryName,
+                  selected: selected,
+                  colorScheme: colorScheme,
+                  onTap: () {
+                    _onCategorySelected(category);
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDesktopCategoryItem({
+    required String label,
+    required bool selected,
+    required ColorScheme colorScheme,
+    required VoidCallback onTap,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: onTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            height: 44,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              color: selected
+                  ? colorScheme.primaryContainer
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                // -----------------------------------------
+                // Selected indicator
+                // -----------------------------------------
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 150),
+                  width: 4,
+                  height: selected ? 24 : 0,
+                  decoration: BoxDecoration(
+                    color: colorScheme.primary,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+
+                SizedBox(width: selected ? 10 : 0),
+
+                // -----------------------------------------
+                // Category name
+                // -----------------------------------------
+                Expanded(
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                      color: selected
+                          ? colorScheme.onPrimaryContainer
+                          : colorScheme.onSurface,
+                    ),
+                  ),
+                ),
+
+                // -----------------------------------------
+                // Arrow for selected category
+                // -----------------------------------------
+                if (selected)
+                  Icon(
+                    Icons.chevron_right,
+                    size: 18,
+                    color: colorScheme.primary,
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
   // --------------------------------------------------
   // Menu Panel
   // --------------------------------------------------
 
   Widget _buildMenuPanel() {
+    final filteredItems = _menuItems.where((item) {
+      return matchesMenuSearch(item.itemName, _menuSearchText);
+    }).toList();
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(8),
+          child: TextField(
+            controller: _menuSearchController,
+            decoration: InputDecoration(
+              hintText: 'Search menu...',
+              prefixIcon: const Icon(Icons.search),
+              suffixIcon: _menuSearchText.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () {
+                        _menuSearchController.clear();
+                        setState(() {
+                          _menuSearchText = '';
+                        });
+                      },
+                    )
+                  : null,
+              border: const OutlineInputBorder(),
+              isDense: true,
+            ),
+            onChanged: (value) {
+              setState(() {
+                _menuSearchText = value;
+              });
+            },
+          ),
+        ),
+        Expanded(
+          child: PosMenuPanel(
+            items: filteredItems,
+            onItemSelected: _onMenuItemSelected,
+          ),
+        ),
+      ],
+    );
+  }
+  /*
+  Widget _buildMenuPanel() {
     if (_loadingItems) {
       return const Center(child: CircularProgressIndicator());
     }
+    final filteredItems = _menuItems.where((item) {
+      return matchesMenuSearch(item.itemName, _menuSearchText);
+    }).toList();
 
-    return PosMenuPanel(items: _menuItems, onItemSelected: _onMenuItemSelected);
+
+
+
+    return PosMenuPanel(
+      items: filteredItems,
+      onItemSelected: _onMenuItemSelected,
+    );
   }
-
+*/
   // --------------------------------------------------
   // Temporary Cart
   // --------------------------------------------------
@@ -1136,7 +1491,7 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
   // --------------------------------------------------
   // Mobile Categories
   // --------------------------------------------------
-
+  /*
   Widget _buildMobileCategories() {
     if (_loadingCategories) {
       return const Center(child: CircularProgressIndicator());
@@ -1170,8 +1525,54 @@ class _PosOrderScreenState extends State<PosOrderScreen> {
       },
     );
   }
+*/
 
-  // --------------------------------------------------
+  Widget _buildMobileCategories() {
+    if (_loadingCategories) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return ListView.builder(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      itemCount: _categories.length + 1,
+      itemBuilder: (context, index) {
+        // -----------------------------------------
+        // ALL
+        // -----------------------------------------
+        if (index == 0) {
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ChoiceChip(
+              label: const Text('ALL'),
+              selected: _selectedCategoryId == null,
+              onSelected: (_) {
+                _onAllCategoriesSelected();
+              },
+            ),
+          );
+        }
+
+        // -----------------------------------------
+        // Normal category
+        // -----------------------------------------
+        final category = _categories[index - 1];
+
+        final selected = category.categoryId == _selectedCategoryId;
+
+        return Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: ChoiceChip(
+            label: Text(category.categoryName),
+            selected: selected,
+            onSelected: (_) {
+              _onCategorySelected(category);
+            },
+          ),
+        );
+      },
+    );
+  } // --------------------------------------------------
   // Build
   // --------------------------------------------------
 

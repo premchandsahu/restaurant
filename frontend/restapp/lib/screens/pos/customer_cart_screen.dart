@@ -1,11 +1,21 @@
 import 'package:flutter/material.dart';
 
 import '../../models/pos/customer_cart.dart';
+import 'customer_order_status_screen.dart';
+import '../../services/pos/customer_order_service.dart';
 
 class CustomerCartScreen extends StatefulWidget {
   final CustomerCart cart;
-
-  const CustomerCartScreen({super.key, required this.cart});
+  final String customerSessionToken;
+  final String baseUrl;
+  final int? existingOrderId;
+  const CustomerCartScreen({
+    super.key,
+    required this.cart,
+    required this.customerSessionToken,
+    required this.baseUrl,
+    this.existingOrderId,
+  });
 
   @override
   State<CustomerCartScreen> createState() => _CustomerCartScreenState();
@@ -13,7 +23,7 @@ class CustomerCartScreen extends StatefulWidget {
 
 class _CustomerCartScreenState extends State<CustomerCartScreen> {
   CustomerCart get cart => widget.cart;
-
+  bool _placingOrder = false;
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -271,11 +281,19 @@ class _CustomerCartScreenState extends State<CustomerCartScreen> {
               width: double.infinity,
               height: 48,
               child: ElevatedButton(
-                onPressed: _placeOrder,
-                child: const Text(
-                  'PLACE ORDER',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
+                onPressed: _placingOrder ? null : _placeOrder,
+                child: _placingOrder
+                    ? const SizedBox(
+                        width: 22,
+                        height: 22,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : Text(
+                        widget.existingOrderId != null
+                            ? 'ADD TO ORDER'
+                            : 'PLACE ORDER',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
               ),
             ),
           ],
@@ -287,12 +305,168 @@ class _CustomerCartScreenState extends State<CustomerCartScreen> {
   // ----------------------------------------------------------
   // Place order
   // ----------------------------------------------------------
+  /*
+  Future<void> _placeOrder() async {
+    if (_placingOrder) {
+      return;
+    }
 
-  void _placeOrder() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Place Order will be connected to the API next.'),
-      ),
-    );
+    if (cart.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _placingOrder = true;
+    });
+
+    try {
+      final service = CustomerOrderService(baseUrl: widget.baseUrl, token: '');
+
+      final result = await service.placeCustomerOrder(
+        customerSessionToken: widget.customerSessionToken,
+        cart: cart,
+        guestCount: 1,
+      );
+
+      if (!mounted) return;
+
+      final orderId = result['orderId'];
+
+      cart.clear();
+
+      await showDialog(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Order Placed'),
+            content: Text(
+              orderId != null
+                  ? 'Your order #$orderId has been placed successfully.'
+                  : 'Your order has been placed successfully.',
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                },
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => CustomerOrderStatusScreen(
+            customerSessionToken: widget.customerSessionToken,
+            baseUrl: widget.baseUrl,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.toString())));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _placingOrder = false;
+        });
+      }
+    }
+  }
+*/
+  Future<void> _placeOrder() async {
+    if (_placingOrder) {
+      return;
+    }
+
+    if (cart.isEmpty) {
+      return;
+    }
+
+    setState(() {
+      _placingOrder = true;
+    });
+
+    try {
+      final service = CustomerOrderService(baseUrl: widget.baseUrl, token: '');
+
+      Map<String, dynamic> result;
+
+      if (widget.existingOrderId != null) {
+        result = await service.addItemsToCustomerOrder(
+          customerSessionToken: widget.customerSessionToken,
+          orderId: widget.existingOrderId!,
+          cart: cart,
+        );
+      } else {
+        result = await service.placeCustomerOrder(
+          customerSessionToken: widget.customerSessionToken,
+          cart: cart,
+          guestCount: 1,
+        );
+      }
+
+      if (!mounted) return;
+
+      final orderId = result['orderId'] ?? widget.existingOrderId;
+
+      cart.clear();
+
+      await showDialog(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: Text(
+              widget.existingOrderId != null ? 'Items Added' : 'Order Placed',
+            ),
+            content: Text(
+              widget.existingOrderId != null
+                  ? 'Items have been added to Order #$orderId successfully.'
+                  : 'Your order #$orderId has been placed successfully.',
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                },
+                child: const Text('OK'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => CustomerOrderStatusScreen(
+            customerSessionToken: widget.customerSessionToken,
+            baseUrl: widget.baseUrl,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.toString())));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _placingOrder = false;
+        });
+      }
+    }
   }
 }

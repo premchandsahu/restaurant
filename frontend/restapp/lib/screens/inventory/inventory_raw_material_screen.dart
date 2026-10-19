@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../models/inventory/inventory_raw_material.dart';
 import '../../models/pos/pos_tax.dart';
 import '../../services/inventory/inventory_raw_material_service.dart';
+import '../../widgets/common/master_entry_widgets.dart';
 
 class InventoryRawMaterialScreen extends StatefulWidget {
   final int outletId;
@@ -418,45 +419,14 @@ class _InventoryRawMaterialScreenState
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Raw Material Master'),
-        actions: [
-          IconButton(
-            tooltip: 'Refresh',
-            onPressed: _loading ? null : _loadAll,
-            icon: const Icon(Icons.refresh),
-          ),
-        ],
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _errorMessage != null
-          ? _buildError()
-          : LayoutBuilder(
-              builder: (context, constraints) {
-                final wide = constraints.maxWidth >= 1000;
-
-                if (wide) {
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SizedBox(width: 420, child: _buildForm()),
-                      const VerticalDivider(width: 1),
-                      Expanded(child: _buildList()),
-                    ],
-                  );
-                }
-
-                return Column(
-                  children: [
-                    _buildForm(compact: true),
-                    const Divider(),
-                    Expanded(child: _buildList()),
-                  ],
-                );
-              },
-            ),
+    return MasterEntryScaffold(
+      title: 'Raw Material Master',
+      isLoading: _loading,
+      errorMessage: _errorMessage,
+      onRefresh: _loadAll,
+      onRetry: _loadAll,
+      form: _buildForm(),
+      list: _buildList(),
     );
   }
 
@@ -464,7 +434,7 @@ class _InventoryRawMaterialScreenState
   // FORM
   // ============================================================
 
-  Widget _buildForm({bool compact = false}) {
+  Widget _buildForm() {
     return Card(
       margin: const EdgeInsets.all(12),
       child: Padding(
@@ -482,34 +452,26 @@ class _InventoryRawMaterialScreenState
 
                 const SizedBox(height: 16),
 
-                TextFormField(
+                MasterTextField(
                   controller: _materialCodeController,
-                  decoration: const InputDecoration(
-                    labelText: 'Material Code',
-                    border: OutlineInputBorder(),
-                  ),
+                  label: 'Material Code',
                   validator: (value) {
                     if (value == null || value.trim().isEmpty) {
                       return 'Material code is required';
                     }
-
                     return null;
                   },
                 ),
 
                 const SizedBox(height: 12),
 
-                TextFormField(
+                MasterTextField(
                   controller: _materialNameController,
-                  decoration: const InputDecoration(
-                    labelText: 'Material Name',
-                    border: OutlineInputBorder(),
-                  ),
+                  label: 'Material Name',
                   validator: (value) {
                     if (value == null || value.trim().isEmpty) {
                       return 'Material name is required';
                     }
-
                     return null;
                   },
                 ),
@@ -528,66 +490,51 @@ class _InventoryRawMaterialScreenState
 
                 const SizedBox(height: 12),
 
-                TextFormField(
+                MasterTextField(
                   controller: _purchaseRateController,
+                  label: 'Purchase Rate',
                   keyboardType: const TextInputType.numberWithOptions(
                     decimal: true,
                   ),
-                  decoration: const InputDecoration(
-                    labelText: 'Purchase Rate',
-                    border: OutlineInputBorder(),
-                  ),
                   validator: (value) {
                     final amount = double.tryParse(value?.trim() ?? '');
-
                     if (amount == null || amount < 0) {
                       return 'Enter a valid purchase rate';
                     }
-
                     return null;
                   },
                 ),
 
                 const SizedBox(height: 12),
 
-                TextFormField(
+                MasterTextField(
                   controller: _reorderLevelController,
+                  label: 'Reorder Level',
                   keyboardType: const TextInputType.numberWithOptions(
                     decimal: true,
                   ),
-                  decoration: const InputDecoration(
-                    labelText: 'Reorder Level',
-                    border: OutlineInputBorder(),
-                  ),
                   validator: (value) {
                     final amount = double.tryParse(value?.trim() ?? '');
-
                     if (amount == null || amount < 0) {
                       return 'Enter a valid reorder level';
                     }
-
                     return null;
                   },
                 ),
 
                 const SizedBox(height: 12),
 
-                TextFormField(
+                MasterTextField(
                   controller: _reorderQtyController,
+                  label: 'Reorder Quantity',
                   keyboardType: const TextInputType.numberWithOptions(
                     decimal: true,
                   ),
-                  decoration: const InputDecoration(
-                    labelText: 'Reorder Quantity',
-                    border: OutlineInputBorder(),
-                  ),
                   validator: (value) {
                     final amount = double.tryParse(value?.trim() ?? '');
-
                     if (amount == null || amount < 0) {
                       return 'Enter a valid reorder quantity';
                     }
-
                     return null;
                   },
                 ),
@@ -607,29 +554,11 @@ class _InventoryRawMaterialScreenState
 
                 const SizedBox(height: 12),
 
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _saving ? null : _save,
-                        icon: _saving
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.save),
-                        label: Text(_isEditing ? 'UPDATE' : 'SAVE'),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    OutlinedButton(
-                      onPressed: _saving ? null : _clearForm,
-                      child: const Text('CLEAR'),
-                    ),
-                  ],
+                MasterSaveActions(
+                  isSaving: _saving,
+                  isEditing: _isEditing,
+                  onSave: _save,
+                  onClear: _clearForm,
                 ),
               ],
             ),
@@ -644,31 +573,21 @@ class _InventoryRawMaterialScreenState
   // ============================================================
 
   Widget _buildCategorySelector() {
-    return InkWell(
+    return MasterLookupField(
+      label: 'Inventory Category',
+      placeholder: 'Select category',
+      value: _selectedCategory == null
+          ? null
+          : '${_selectedCategory!.categoryCode} - '
+                '${_selectedCategory!.categoryName}',
       onTap: () async {
         final category = await _showCategoryDialog();
-
         if (category != null) {
           setState(() {
             _selectedCategory = category;
           });
         }
       },
-      child: InputDecorator(
-        decoration: const InputDecoration(
-          labelText: 'Inventory Category',
-          border: OutlineInputBorder(),
-          suffixIcon: Icon(Icons.search),
-        ),
-        child: Text(
-          _selectedCategory == null
-              ? 'Select category'
-              : '${_selectedCategory!.categoryCode} - ${_selectedCategory!.categoryName}',
-          style: TextStyle(
-            color: _selectedCategory == null ? Colors.grey : null,
-          ),
-        ),
-      ),
     );
   }
 
@@ -677,12 +596,9 @@ class _InventoryRawMaterialScreenState
   // ============================================================
 
   Widget _buildUnitSelector() {
-    return DropdownButtonFormField<InventoryUnit>(
+    return MasterDropdownField<InventoryUnit>(
+      label: 'Base Unit',
       value: _selectedUnit,
-      decoration: const InputDecoration(
-        labelText: 'Base Unit',
-        border: OutlineInputBorder(),
-      ),
       items: _units.map((unit) {
         return DropdownMenuItem<InventoryUnit>(
           value: unit,
@@ -698,7 +614,6 @@ class _InventoryRawMaterialScreenState
         if (value == null) {
           return 'Please select a unit';
         }
-
         return null;
       },
     );
@@ -709,33 +624,22 @@ class _InventoryRawMaterialScreenState
   // ============================================================
 
   Widget _buildTaxGroupSelector() {
-    return InkWell(
+    return MasterLookupField(
+      label: 'Tax Group',
+      placeholder: 'Select tax group',
+      value: _selectedTaxGroup == null
+          ? null
+          : '${_selectedTaxGroup!.taxGroupCode} - '
+                '${_selectedTaxGroup!.taxGroupName} '
+                '(${_formatNumber(_selectedTaxGroup!.totalRate)}%)',
       onTap: () async {
         final tax = await _showTaxGroupDialog();
-
         if (tax != null) {
           setState(() {
             _selectedTaxGroup = tax;
           });
         }
       },
-      child: InputDecorator(
-        decoration: const InputDecoration(
-          labelText: 'Tax Group',
-          border: OutlineInputBorder(),
-          suffixIcon: Icon(Icons.search),
-        ),
-        child: Text(
-          _selectedTaxGroup == null
-              ? 'Select tax group'
-              : '${_selectedTaxGroup!.taxGroupCode} - '
-                    '${_selectedTaxGroup!.taxGroupName} '
-                    '(${_formatNumber(_selectedTaxGroup!.totalRate)}%)',
-          style: TextStyle(
-            color: _selectedTaxGroup == null ? Colors.grey : null,
-          ),
-        ),
-      ),
     );
   }
 
@@ -752,9 +656,7 @@ class _InventoryRawMaterialScreenState
       }
 
       final code = material.materialCode.toLowerCase();
-
       final name = material.materialName.toLowerCase();
-
       final category = material.categoryName?.toLowerCase() ?? '';
 
       return code.contains(searchText) ||
@@ -767,46 +669,17 @@ class _InventoryRawMaterialScreenState
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Text(
-                'Raw Materials',
-                style: Theme.of(context).textTheme.titleLarge,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '(${filteredMaterials.length})',
-                style: Theme.of(context).textTheme.bodyMedium,
-              ),
-            ],
+          MasterListHeader(
+            title: 'Raw Materials',
+            count: filteredMaterials.length,
           ),
-
           const SizedBox(height: 12),
-
-          TextField(
+          MasterSearchField(
             controller: _materialSearchController,
-            decoration: InputDecoration(
-              hintText: 'Search material code, name or category...',
-              prefixIcon: const Icon(Icons.search),
-              suffixIcon: _materialSearchController.text.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () {
-                        _materialSearchController.clear();
-
-                        setState(() {});
-                      },
-                    ),
-              border: const OutlineInputBorder(),
-            ),
-            onChanged: (_) {
-              setState(() {});
-            },
+            hintText: 'Search material code, name or category...',
+            onChanged: (_) => setState(() {}),
           ),
-
           const SizedBox(height: 12),
-
           Expanded(
             child: filteredMaterials.isEmpty
                 ? Center(
@@ -823,7 +696,6 @@ class _InventoryRawMaterialScreenState
                         separatorBuilder: (_, __) => const Divider(height: 1),
                         itemBuilder: (context, index) {
                           final material = filteredMaterials[index];
-
                           final taxGroup = _taxGroups
                               .where(
                                 (tax) => tax.taxGroupId == material.taxGroupId,
@@ -832,9 +704,7 @@ class _InventoryRawMaterialScreenState
 
                           return ListTile(
                             dense: true,
-
                             title: Text(material.materialName),
-
                             subtitle: Text(
                               '${material.materialCode}'
                               '  |  '
@@ -843,7 +713,6 @@ class _InventoryRawMaterialScreenState
                               'Rate: ${_formatNumber(material.purchaseRate)}'
                               '${taxGroup == null ? '' : '  |  GST: ${_formatNumber(taxGroup.totalRate)}%'}',
                             ),
-
                             trailing: IconButton(
                               tooltip: 'Edit',
                               icon: const Icon(Icons.edit),
@@ -856,34 +725,6 @@ class _InventoryRawMaterialScreenState
                   ),
           ),
         ],
-      ),
-    );
-  }
-  // ============================================================
-  // ERROR
-  // ============================================================
-
-  Widget _buildError() {
-    return Center(
-      child: Card(
-        margin: const EdgeInsets.all(20),
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.error_outline, size: 40),
-              const SizedBox(height: 12),
-              Text(_errorMessage ?? 'Unable to load data.'),
-              const SizedBox(height: 12),
-              ElevatedButton.icon(
-                onPressed: _loadAll,
-                icon: const Icon(Icons.refresh),
-                label: const Text('RETRY'),
-              ),
-            ],
-          ),
-        ),
       ),
     );
   }

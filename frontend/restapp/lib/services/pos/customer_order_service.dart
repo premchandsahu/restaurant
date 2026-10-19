@@ -38,6 +38,42 @@ class CustomerOrderService {
     throw Exception(data['message'] ?? 'Unable to request bill');
   }
 
+  Future<Map<String, dynamic>> getCustomerBill({
+    required String customerSessionToken,
+    required int orderId,
+  }) async {
+    final url = Uri.parse(
+      '$baseUrl/customer-order/bill/'
+      '$customerSessionToken/$orderId',
+    );
+
+    final response = await http.get(
+      url,
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+    );
+
+    dynamic responseData;
+
+    try {
+      responseData = jsonDecode(response.body);
+    } catch (_) {
+      throw Exception('Invalid response from customer bill API');
+    }
+
+    final Map<String, dynamic> data = Map<String, dynamic>.from(responseData);
+
+    if (response.statusCode >= 200 &&
+        response.statusCode < 300 &&
+        data['success'] == true) {
+      return data;
+    }
+
+    throw Exception(data['message'] ?? 'Unable to get customer bill');
+  }
+
   Future<CustomerOrderStatus> getCustomerOrderStatus({
     required String customerSessionToken,
   }) async {
@@ -161,7 +197,7 @@ class CustomerOrderService {
     // ----------------------------------------------------------
 
     final body = {
-      'sessionToken': customerSessionToken,
+      'customerSessionToken': customerSessionToken,
 
       'customerId': customerId,
 
@@ -231,5 +267,87 @@ class CustomerOrderService {
       'Unable to place customer order '
       '(${response.statusCode})',
     );
+  }
+
+  Future<Map<String, dynamic>> addItemsToCustomerOrder({
+    required String customerSessionToken,
+    required int orderId,
+    required CustomerCart cart,
+  }) async {
+    if (customerSessionToken.trim().isEmpty) {
+      throw Exception('Customer session token is required');
+    }
+
+    if (orderId <= 0) {
+      throw Exception('Valid orderId is required');
+    }
+
+    if (cart.isEmpty) {
+      throw Exception('Cart is empty');
+    }
+
+    final items = cart.items.map((cartItem) {
+      return {
+        'menuItemId': cartItem.menuItem.menuItemId,
+        'variantId': cartItem.variant?.variantId,
+        'qty': cartItem.quantity,
+        'specialInstruction': cartItem.specialInstruction.trim().isEmpty
+            ? null
+            : cartItem.specialInstruction.trim(),
+        'modifiers': cartItem.modifiers.map((modifier) {
+          return {
+            'modifierGroupId': modifier.modifierGroupId,
+            'modifierOptionId': modifier.modifierOptionId,
+            'qty': 1,
+          };
+        }).toList(),
+      };
+    }).toList();
+
+    final body = {
+      'customerSessionToken': customerSessionToken,
+      'orderId': orderId,
+      'items': items,
+    };
+
+    final response = await http.post(
+      Uri.parse('$baseUrl/customer-order/add-items'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: jsonEncode(body),
+    );
+
+    dynamic responseData;
+
+    try {
+      responseData = jsonDecode(response.body);
+    } catch (_) {
+      throw Exception('Invalid response from customer order API');
+    }
+
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      if (responseData is Map<String, dynamic>) {
+        if (responseData['success'] == true) {
+          return responseData;
+        }
+
+        throw Exception(
+          responseData['message'] ?? 'Unable to add items to order',
+        );
+      }
+
+      throw Exception('Invalid success response from customer order API');
+    }
+
+    if (responseData is Map<String, dynamic>) {
+      throw Exception(
+        responseData['message'] ??
+            'Unable to add items to order (${response.statusCode})',
+      );
+    }
+
+    throw Exception('Unable to add items to order (${response.statusCode})');
   }
 }

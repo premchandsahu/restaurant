@@ -652,26 +652,29 @@ const db=await conn.getConnection();
         // VARIANTS
         // ------------------------------------------
 
+        const includeInactiveVariants =
+        String(req.query.includeInactive || '') === '1';
+
+        const activeFilter = includeInactiveVariants
+          ? ''
+          : ' AND is_active = TRUE';
+
         const [variants] = await db.query(
-            `
-            SELECT
-                variant_id,
-                variant_uuid,
-                menu_item_id,
-                variant_code,
-                variant_name,
-                rate,
-                tax_group_id,
-                display_order,
-                is_default
-            FROM menu_item_variant
-            WHERE menu_item_id = ?
-              AND is_active = TRUE
-            ORDER BY
-                display_order,
-                variant_name
-            `,
-            [itemId]
+          `SELECT
+              variant_id,
+              variant_uuid,
+              menu_item_id,
+              variant_code,
+              variant_name,
+              rate,
+              tax_group_id,
+              display_order,
+              is_default,
+              is_active
+           FROM menu_item_variant
+           WHERE menu_item_id = ?${activeFilter}
+           ORDER BY display_order, variant_name`,
+          [itemId]
         );
 
 
@@ -756,5 +759,965 @@ const db=await conn.getConnection();
             success: false,
             message: 'Unable to get menu item'
         });
+    }
+};
+
+
+// ============================================================
+// UPDATE MENU ITEM
+// PUT /menu/items/:menuItemId
+// ============================================================
+
+exports.updateItem = async (req, res) => {
+    const db = await conn.getConnection();
+
+    try {
+        const menuItemId = Number(req.params.menuItemId);
+        const outletId = Number(req.body.outletId);
+        const menuCategoryId = Number(req.body.menuCategoryId);
+
+        const itemCode = String(req.body.itemCode || '').trim();
+        const itemName = String(req.body.itemName || '').trim();
+        const itemType = String(req.body.itemType || 'FOOD')
+            .trim()
+            .toUpperCase();
+
+        const baseRate = Number(req.body.baseRate);
+
+        const taxGroupId =
+            req.body.taxGroupId === null ||
+            req.body.taxGroupId === undefined ||
+            req.body.taxGroupId === ''
+                ? null
+                : Number(req.body.taxGroupId);
+
+        const preparationTimeMinutes =
+            Number(req.body.preparationTimeMinutes ?? 0);
+
+        const toBool = (value) =>
+            value === true || value === 1 || value === '1' ? 1 : 0;
+
+        const description =
+            String(req.body.description ?? '').trim() || null;
+
+        const imageUrl =
+            String(req.body.imageUrl ?? '').trim() || null;
+
+        const barcode =
+            String(req.body.barcode ?? '').trim() || null;
+
+        // Basic validation
+        if (
+            !Number.isInteger(menuItemId) ||
+            menuItemId <= 0 ||
+            !Number.isInteger(outletId) ||
+            outletId <= 0
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid menuItemId and outletId are required'
+            });
+        }
+
+        if (!Number.isInteger(menuCategoryId) || menuCategoryId <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid menu category is required'
+            });
+        }
+
+        if (!itemCode || !itemName) {
+            return res.status(400).json({
+                success: false,
+                message: 'Item code and item name are required'
+            });
+        }
+
+        if (!['FOOD', 'BEVERAGE',  'LIQUOR','SERVICE', 'OTHER'].includes(itemType)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid item type'
+            });
+        }
+
+        if (!Number.isFinite(baseRate) || baseRate < 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid base rate is required'
+            });
+        }
+
+        if (
+            !Number.isInteger(preparationTimeMinutes) ||
+            preparationTimeMinutes < 0
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid preparation time'
+            });
+        }
+
+        if (
+            taxGroupId !== null &&
+            (!Number.isInteger(taxGroupId) || taxGroupId <= 0)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid tax group'
+            });
+        }
+
+        // Verify user access to the outlet
+        const [access] = await db.query(
+            `
+            SELECT 1
+            FROM user_outlet uo
+            INNER JOIN outlet o
+                ON o.outlet_id = uo.outlet_id
+            WHERE uo.user_id = ?
+              AND uo.outlet_id = ?
+              AND o.company_id = ?
+              AND o.is_active = TRUE
+            LIMIT 1
+            `,
+            [
+                req.user.userId,
+                outletId,
+                req.user.companyId
+            ]
+        );
+
+        if (access.length === 0) {
+            return res.status(403).json({
+                success: false,
+                message: 'You are not authorized for this outlet'
+            });
+        }
+
+        // Confirm the menu item belongs to this outlet
+        const [existing] = await db.query(
+            `
+            SELECT menu_item_id
+            FROM menu_item
+            WHERE menu_item_id = ?
+              AND outlet_id = ?
+            LIMIT 1
+            `,
+            [menuItemId, outletId]
+        );
+
+        if (existing.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Menu item not found'
+            });
+        }
+
+        // Validate category belongs to this outlet
+        const [categories] = await db.query(
+            `
+            SELECT menu_category_id
+            FROM menu_category
+            WHERE menu_category_id = ?
+              AND outlet_id = ?
+              AND is_active = TRUE
+            LIMIT 1
+            `,
+            [menuCategoryId, outletId]
+        );
+
+        if (categories.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or inactive menu category'
+            });
+        }
+
+        // Check duplicate item code, excluding the current item
+        const [duplicates] = await db.query(
+            `
+            SELECT menu_item_id
+            FROM menu_item
+            WHERE outlet_id = ?
+              AND item_code = ?
+              AND menu_item_id <> ?
+            LIMIT 1
+            `,
+            [outletId, itemCode, menuItemId]
+        );
+
+        if (duplicates.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: 'This item code already exists'
+            });
+        }
+
+        // Update the menu item
+        await db.query(
+            `
+            UPDATE menu_item
+            SET
+                menu_category_id = ?,
+                item_code = ?,
+                item_name = ?,
+                description = ?,
+                item_type = ?,
+                base_rate = ?,
+                tax_group_id = ?,
+                is_veg = ?,
+                is_egg = ?,
+                is_spicy = ?,
+                image_url = ?,
+                barcode = ?,
+                preparation_time_minutes = ?,
+                allow_discount = ?,
+                is_available = ?,
+                is_active = ?
+            WHERE menu_item_id = ?
+              AND outlet_id = ?
+            `,
+            [
+                menuCategoryId,
+                itemCode,
+                itemName,
+                description,
+                itemType,
+                baseRate,
+                taxGroupId,
+                toBool(req.body.isVeg),
+                toBool(req.body.isEgg),
+                toBool(req.body.isSpicy),
+                imageUrl,
+                barcode,
+                preparationTimeMinutes,
+                toBool(req.body.allowDiscount),
+                toBool(req.body.isAvailable),
+                toBool(req.body.isActive),
+                menuItemId,
+                outletId
+            ]
+        );
+
+        return res.json({
+            success: true,
+            message: 'Menu item updated successfully'
+        });
+
+    } catch (error) {
+        console.error('Update menu item error:', error);
+
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({
+                success: false,
+                message: 'This item code already exists'
+            });
+        }
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to update menu item'
+        });
+
+    } finally {
+        db.release();
+    }
+};
+
+
+// ============================================================
+// CREATE MENU ITEM
+// POST /menu/items
+// ============================================================
+
+exports.createItem = async (req, res) => {
+    let db;
+
+    try {
+        db = await conn.getConnection();
+
+        const outletId = Number(req.body.outletId);
+        const menuCategoryId = Number(req.body.menuCategoryId);
+
+        const itemCode = String(req.body.itemCode || '').trim();
+        const itemName = String(req.body.itemName || '').trim();
+
+        const description =
+            String(req.body.description ?? '').trim() || null;
+
+        const itemType = String(req.body.itemType || 'FOOD')
+            .trim()
+            .toUpperCase();
+
+        const baseRate = Number(req.body.baseRate);
+
+        const taxGroupId =
+            req.body.taxGroupId === null ||
+            req.body.taxGroupId === undefined ||
+            req.body.taxGroupId === ''
+                ? null
+                : Number(req.body.taxGroupId);
+
+        const preparationTimeMinutes =
+            Number(req.body.preparationTimeMinutes ?? 0);
+
+        const toBool = (value) =>
+            value === true || value === 1 || value === '1' ? 1 : 0;
+
+        const imageUrl =
+            String(req.body.imageUrl ?? '').trim() || null;
+
+        const barcode =
+            String(req.body.barcode ?? '').trim() || null;
+
+        // --------------------------------------------------
+        // VALIDATION
+        // --------------------------------------------------
+
+        if (
+            !Number.isInteger(outletId) ||
+            outletId <= 0 ||
+            !Number.isInteger(menuCategoryId) ||
+            menuCategoryId <= 0
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Valid outlet and menu category are required'
+            });
+        }
+
+        if (!itemCode || !itemName) {
+            return res.status(400).json({
+                success: false,
+                message: 'Item code and item name are required'
+            });
+        }
+
+        if (!['FOOD', 'BEVERAGE', 'LIQUOR', 'SERVICE', 'OTHER'].includes(itemType)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid item type'
+            });
+        }
+
+        if (!Number.isFinite(baseRate) || baseRate < 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Enter a valid base rate'
+            });
+        }
+
+        if (
+            !Number.isInteger(preparationTimeMinutes) ||
+            preparationTimeMinutes < 0
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid preparation time'
+            });
+        }
+
+        if (
+            taxGroupId !== null &&
+            (!Number.isInteger(taxGroupId) || taxGroupId <= 0)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid tax group'
+            });
+        }
+
+        // --------------------------------------------------
+        // VERIFY USER ACCESS TO OUTLET
+        // --------------------------------------------------
+
+        const [access] = await db.query(
+            `
+            SELECT 1
+            FROM user_outlet uo
+            INNER JOIN outlet o
+                ON o.outlet_id = uo.outlet_id
+            WHERE uo.user_id = ?
+              AND uo.outlet_id = ?
+              AND o.company_id = ?
+              AND o.is_active = TRUE
+            LIMIT 1
+            `,
+            [
+                req.user.userId,
+                outletId,
+                req.user.companyId
+            ]
+        );
+
+        if (access.length === 0) {
+            return res.status(403).json({
+                success: false,
+                message: 'You are not authorized for this outlet'
+            });
+        }
+
+        // --------------------------------------------------
+        // VERIFY CATEGORY BELONGS TO OUTLET
+        // --------------------------------------------------
+
+        const [categories] = await db.query(
+            `
+            SELECT menu_category_id
+            FROM menu_category
+            WHERE menu_category_id = ?
+              AND outlet_id = ?
+              AND is_active = TRUE
+            LIMIT 1
+            `,
+            [menuCategoryId, outletId]
+        );
+
+        if (categories.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or inactive menu category'
+            });
+        }
+
+        // --------------------------------------------------
+        // CHECK DUPLICATE ITEM CODE
+        // --------------------------------------------------
+
+        const [duplicates] = await db.query(
+            `
+            SELECT menu_item_id
+            FROM menu_item
+            WHERE outlet_id = ?
+              AND item_code = ?
+            LIMIT 1
+            `,
+            [outletId, itemCode]
+        );
+
+        if (duplicates.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: 'This item code already exists'
+            });
+        }
+
+        // --------------------------------------------------
+        // INSERT MENU ITEM
+        // --------------------------------------------------
+
+        const menuItemUuid = require('crypto').randomUUID();
+
+        const [result] = await db.query(
+            `
+            INSERT INTO menu_item (
+                menu_item_uuid,
+                outlet_id,
+                menu_category_id,
+                item_code,
+                item_name,
+                description,
+                item_type,
+                base_rate,
+                tax_group_id,
+                is_veg,
+                is_egg,
+                is_spicy,
+                image_url,
+                barcode,
+                preparation_time_minutes,
+                allow_discount,
+                is_available,
+                is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+            [
+                menuItemUuid,
+                outletId,
+                menuCategoryId,
+                itemCode,
+                itemName,
+                description,
+                itemType,
+                baseRate,
+                taxGroupId,
+                toBool(req.body.isVeg),
+                toBool(req.body.isEgg),
+                toBool(req.body.isSpicy),
+                imageUrl,
+                barcode,
+                preparationTimeMinutes,
+                toBool(req.body.allowDiscount),
+                toBool(req.body.isAvailable),
+                toBool(req.body.isActive)
+            ]
+        );
+
+        return res.status(201).json({
+            success: true,
+            message: 'Menu item created successfully',
+            menuItemId: result.insertId,
+            menuItemUuid
+        });
+
+    } catch (error) {
+        console.error('Create menu item error:', error);
+
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({
+                success: false,
+                message: 'This item code already exists'
+            });
+        }
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to create menu item'
+        });
+
+    } finally {
+        if (db) {
+            db.release();
+        }
+    }
+};
+
+
+// ============================================================
+// SHARED VALIDATION FOR MENU ITEM VARIANTS
+// ============================================================
+
+function menuVariantError(message, statusCode = 400) {
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    return error;
+}
+
+function menuVariantBool(value, defaultValue = false) {
+    if (value === undefined || value === null) {
+        return defaultValue;
+    }
+
+    if (typeof value === 'boolean') {
+        return value;
+    }
+
+    return ['1', 'true', 'yes'].includes(
+        String(value).trim().toLowerCase()
+    );
+}
+
+async function validateMenuVariantInput(
+    db,
+    req,
+    menuItemId,
+    variantId = null
+) {
+    const outletId = Number(req.body.outletId);
+
+    const variantCode = String(
+        req.body.variantCode || ''
+    ).trim();
+
+    const variantName = String(
+        req.body.variantName || ''
+    ).trim();
+
+    const rate = Number(req.body.rate);
+
+    const taxGroupId =
+        req.body.taxGroupId === null ||
+        req.body.taxGroupId === undefined ||
+        req.body.taxGroupId === ''
+            ? null
+            : Number(req.body.taxGroupId);
+
+    const displayOrder = Number(
+        req.body.displayOrder ?? 0
+    );
+
+    const isActive = menuVariantBool(
+        req.body.isActive,
+        true
+    );
+
+    const isDefault =
+        isActive &&
+        menuVariantBool(req.body.isDefault, false);
+
+    if (
+        !Number.isInteger(menuItemId) ||
+        menuItemId <= 0 ||
+        !Number.isInteger(outletId) ||
+        outletId <= 0
+    ) {
+        throw menuVariantError(
+            'Valid menuItemId and outletId are required'
+        );
+    }
+
+    if (!variantCode || !variantName) {
+        throw menuVariantError(
+            'Variant code and variant name are required'
+        );
+    }
+
+    if (
+        req.body.rate === undefined ||
+        String(req.body.rate).trim() === '' ||
+        !Number.isFinite(rate) ||
+        rate < 0
+    ) {
+        throw menuVariantError('Enter a valid variant rate');
+    }
+
+    if (
+        !Number.isInteger(displayOrder) ||
+        displayOrder < 0
+    ) {
+        throw menuVariantError('Invalid display order');
+    }
+
+    if (
+        taxGroupId !== null &&
+        (!Number.isInteger(taxGroupId) || taxGroupId <= 0)
+    ) {
+        throw menuVariantError('Invalid tax group');
+    }
+
+    // Verify user access to the outlet.
+    const [access] = await db.query(
+        `
+        SELECT 1
+        FROM user_outlet uo
+        INNER JOIN outlet o
+            ON o.outlet_id = uo.outlet_id
+        WHERE uo.user_id = ?
+          AND uo.outlet_id = ?
+          AND o.company_id = ?
+          AND o.is_active = TRUE
+        LIMIT 1
+        `,
+        [
+            req.user.userId,
+            outletId,
+            req.user.companyId
+        ]
+    );
+
+    if (access.length === 0) {
+        throw menuVariantError(
+            'You are not authorized for this outlet',
+            403
+        );
+    }
+
+    // Ensure the parent item belongs to this outlet.
+    const [items] = await db.query(
+        `
+        SELECT menu_item_id
+        FROM menu_item
+        WHERE menu_item_id = ?
+          AND outlet_id = ?
+        LIMIT 1
+        `,
+        [menuItemId, outletId]
+    );
+
+    if (items.length === 0) {
+        throw menuVariantError(
+            'Menu item not found for this outlet',
+            404
+        );
+    }
+
+    // On update, ensure the variant belongs to the item.
+    if (variantId !== null) {
+        const [variants] = await db.query(
+            `
+            SELECT variant_id
+            FROM menu_item_variant
+            WHERE variant_id = ?
+              AND menu_item_id = ?
+            LIMIT 1
+            `,
+            [variantId, menuItemId]
+        );
+
+        if (variants.length === 0) {
+            throw menuVariantError(
+                'Variant not found for this menu item',
+                404
+            );
+        }
+    }
+
+    // Validate optional tax group.
+    if (taxGroupId !== null) {
+        const [taxGroups] = await db.query(
+            `
+            SELECT tax_group_id
+            FROM tax_group
+            WHERE tax_group_id = ?
+              AND is_active = TRUE
+            LIMIT 1
+            `,
+            [taxGroupId]
+        );
+
+        if (taxGroups.length === 0) {
+            throw menuVariantError(
+                'Tax group not found or inactive'
+            );
+        }
+    }
+
+    // Check duplicate variant code for this menu item.
+    let duplicateSql = `
+        SELECT variant_id
+        FROM menu_item_variant
+        WHERE menu_item_id = ?
+          AND variant_code = ?
+    `;
+
+    const duplicateParams = [
+        menuItemId,
+        variantCode
+    ];
+
+    if (variantId !== null) {
+        duplicateSql += ' AND variant_id <> ?';
+        duplicateParams.push(variantId);
+    }
+
+    duplicateSql += ' LIMIT 1';
+
+    const [duplicates] = await db.query(
+        duplicateSql,
+        duplicateParams
+    );
+
+    if (duplicates.length > 0) {
+        throw menuVariantError(
+            'This variant code already exists for the menu item',
+            409
+        );
+    }
+
+    return {
+        outletId,
+        variantCode,
+        variantName,
+        rate,
+        taxGroupId,
+        displayOrder,
+        isDefault,
+        isActive
+    };
+}
+
+
+// ============================================================
+// CREATE MENU ITEM VARIANT
+// POST /menu/items/:menuItemId/variants
+// ============================================================
+
+exports.createVariant = async (req, res) => {
+    let db;
+    let transactionStarted = false;
+
+    try {
+        db = await conn.getConnection();
+
+        const menuItemId = Number(req.params.menuItemId);
+
+        const data = await validateMenuVariantInput(
+            db,
+            req,
+            menuItemId
+        );
+
+        await db.beginTransaction();
+        transactionStarted = true;
+
+        // Only one active default variant per menu item.
+        if (data.isDefault) {
+            await db.query(
+                `
+                UPDATE menu_item_variant
+                SET is_default = FALSE
+                WHERE menu_item_id = ?
+                `,
+                [menuItemId]
+            );
+        }
+
+        const variantUuid = require('crypto').randomUUID();
+
+        const [result] = await db.query(
+            `
+            INSERT INTO menu_item_variant (
+                variant_uuid,
+                menu_item_id,
+                variant_code,
+                variant_name,
+                rate,
+                tax_group_id,
+                display_order,
+                is_default,
+                is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+            [
+                variantUuid,
+                menuItemId,
+                data.variantCode,
+                data.variantName,
+                data.rate,
+                data.taxGroupId,
+                data.displayOrder,
+                data.isDefault ? 1 : 0,
+                data.isActive ? 1 : 0
+            ]
+        );
+
+        await db.commit();
+        transactionStarted = false;
+
+        return res.status(201).json({
+            success: true,
+            message: 'Variant created successfully',
+            variantId: result.insertId,
+            variantUuid
+        });
+
+    } catch (error) {
+        if (db && transactionStarted) {
+            await db.rollback();
+        }
+
+        console.error('Create menu variant error:', error);
+
+        return res.status(
+            error.statusCode ||
+            (error.code === 'ER_DUP_ENTRY' ? 409 : 500)
+        ).json({
+            success: false,
+            message:
+                error.code === 'ER_DUP_ENTRY'
+                    ? 'This variant code already exists'
+                    : error.message || 'Unable to create variant'
+        });
+
+    } finally {
+        if (db) db.release();
+    }
+};
+
+
+// ============================================================
+// UPDATE MENU ITEM VARIANT
+// PUT /menu/items/:menuItemId/variants/:variantId
+// ============================================================
+
+exports.updateVariant = async (req, res) => {
+    let db;
+    let transactionStarted = false;
+
+    try {
+        db = await conn.getConnection();
+
+        const menuItemId = Number(req.params.menuItemId);
+        const variantId = Number(req.params.variantId);
+
+        if (
+            !Number.isInteger(variantId) ||
+            variantId <= 0
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid variantId'
+            });
+        }
+
+        const data = await validateMenuVariantInput(
+            db,
+            req,
+            menuItemId,
+            variantId
+        );
+
+        await db.beginTransaction();
+        transactionStarted = true;
+
+        if (data.isDefault) {
+            await db.query(
+                `
+                UPDATE menu_item_variant
+                SET is_default = FALSE
+                WHERE menu_item_id = ?
+                  AND variant_id <> ?
+                `,
+                [menuItemId, variantId]
+            );
+        }
+
+        await db.query(
+            `
+            UPDATE menu_item_variant
+            SET
+                variant_code = ?,
+                variant_name = ?,
+                rate = ?,
+                tax_group_id = ?,
+                display_order = ?,
+                is_default = ?,
+                is_active = ?
+            WHERE variant_id = ?
+              AND menu_item_id = ?
+            `,
+            [
+                data.variantCode,
+                data.variantName,
+                data.rate,
+                data.taxGroupId,
+                data.displayOrder,
+                data.isDefault ? 1 : 0,
+                data.isActive ? 1 : 0,
+                variantId,
+                menuItemId
+            ]
+        );
+
+        await db.commit();
+        transactionStarted = false;
+
+        return res.json({
+            success: true,
+            message: 'Variant updated successfully'
+        });
+
+    } catch (error) {
+        if (db && transactionStarted) {
+            await db.rollback();
+        }
+
+        console.error('Update menu variant error:', error);
+
+        return res.status(
+            error.statusCode ||
+            (error.code === 'ER_DUP_ENTRY' ? 409 : 500)
+        ).json({
+            success: false,
+            message:
+                error.code === 'ER_DUP_ENTRY'
+                    ? 'This variant code already exists'
+                    : error.message || 'Unable to update variant'
+        });
+
+    } finally {
+        if (db) db.release();
     }
 };

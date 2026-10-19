@@ -5312,23 +5312,52 @@ exports.chargeRestaurantBill = async (req, res) => {
         }
 
         // -------------------------------------------------
-        // 8. Restaurant bill amount
+        // 8. Restaurant outstanding amount
         // -------------------------------------------------
 
-        const billAmount = 
+        const [paymentRows] =
+            await connection.query(
+                `
+                SELECT
+                    COALESCE(
+                        SUM(amount),
+                        0
+                    ) AS paid_amount
+            
+                FROM bill_payment
+            
+                WHERE bill_id = ?
+                  AND status = 'SUCCESS'
+                `,
+                [
+                    billId
+                ]
+            );
+        
+        const alreadyPaid =
             Number(
-                bill.grand_total ||
+                paymentRows[0].paid_amount || 0
+            );
+        
+        const grandTotal =
+            Number(
+                bill.grand_total || 0
+            );
+        
+        const billAmount =
+            Math.max(
+                grandTotal - alreadyPaid,
                 0
             );
-
+        
         if (billAmount <= 0) {
-
+        
             await connection.rollback();
-
+        
             return res.status(400).json({
                 success: false,
                 message:
-                    'Restaurant bill amount must be greater than zero'
+                    'Restaurant bill is already fully settled'
             });
         }
 
@@ -5413,8 +5442,221 @@ exports.chargeRestaurantBill = async (req, res) => {
                     billId
                 ]
             );
+        // -------------------------------------------------
+        // 9B. Record restaurant settlement as CREDIT
+        //     because the amount is transferred to the
+        //     hotel guest folio.
+        // -------------------------------------------------
 
+        const paymentUuid =
+            crypto.randomUUID();
 
+        await connection.query(
+            `
+            INSERT INTO bill_payment
+            (
+                payment_uuid,
+                bill_id,
+                outlet_id,
+                terminal_id,
+                payment_date,
+                payment_mode,
+                amount,
+                reference_no,
+                received_by,
+                remarks,
+                status
+            )
+            VALUES
+            (
+                ?,
+                ?,
+                ?,
+                ?,
+                NOW(),
+                'CREDIT',
+                ?,
+                ?,
+                ?,
+                ?,
+                'SUCCESS'
+            )
+            `,
+            [
+                paymentUuid,
+                billId,
+                bill.outlet_id,
+                bill.terminal_id,
+                billAmount,
+                folio.folio_no,
+                req.user.userId,
+                `Charged to Room ${stay.room_no}`
+            ]
+        );
+
+        // -------------------------------------------------
+        // 9C. Mark restaurant bill as fully settled
+        // -------------------------------------------------
+
+        await connection.query(
+            `
+            UPDATE bill
+        
+            SET
+                paid_amount = ?,
+                balance_amount = 0,
+                bill_status = 'PAID',
+                hotel_stay_id = ?,
+                hotel_room_id = ?,
+                updated_by = ?
+        
+            WHERE bill_id = ?
+            `,
+            [
+                grandTotal,
+                stayId,
+                stay.room_id,
+                req.user.userId,
+                billId
+            ]
+        );
+
+        // -------------------------------------------------
+        // 9D. Mark order as PAID and release logical table
+        // -------------------------------------------------
+            
+        if (bill.order_id) {
+        
+            await connection.query(
+                `
+                UPDATE orders
+            
+                SET
+                    order_status = 'PAID'
+            
+                WHERE order_id = ?
+                  AND order_status NOT IN
+                  (
+                      'CANCELLED',
+                      'VOID'
+                  )
+                `,
+                [
+                    bill.order_id
+                ]
+            );
+        
+            const [orderRows] =
+                await connection.query(
+                    `
+                    SELECT
+                        table_id,
+                        logical_table_id
+                
+                    FROM orders
+                
+                    WHERE order_id = ?
+                
+                    FOR UPDATE
+                    `,
+                    [
+                        bill.order_id
+                    ]
+                );
+            
+            if (orderRows.length) {
+            
+                const order =
+                    orderRows[0];
+            
+                // -----------------------------------------
+                // Release logical table
+                // -----------------------------------------
+            
+                if (order.logical_table_id) {
+                
+                    await connection.query(
+                        `
+                        UPDATE logical_table
+                    
+                        SET
+                            status = 'AVAILABLE'
+                    
+                        WHERE logical_table_id = ?
+                        `,
+                        [
+                            order.logical_table_id
+                        ]
+                    );
+                }
+            
+                // -----------------------------------------
+                // Release physical table only when there
+                // are no other active logical orders.
+                // -----------------------------------------
+            
+                if (order.table_id) {
+                
+                    const [activeOrders] =
+                        await connection.query(
+                            `
+                            SELECT
+                                order_id
+                        
+                            FROM orders
+                        
+                            WHERE table_id = ?
+                        
+                              AND order_status NOT IN
+                              (
+                                  'PAID',
+                                  'CANCELLED',
+                                  'VOID',
+                                  'MERGED'
+                              )
+                        
+                            LIMIT 1
+                            `,
+                            [
+                                order.table_id
+                            ]
+                        );
+                    
+                    if (activeOrders.length === 0) {
+                    
+                        await connection.query(
+                            `
+                            UPDATE restaurant_table
+                        
+                            SET
+                                status = 'AVAILABLE'
+                        
+                            WHERE table_id = ?
+                            `,
+                            [
+                                order.table_id
+                            ]
+                        );
+                    
+                    } else {
+                    
+                        await connection.query(
+                            `
+                            UPDATE restaurant_table
+                        
+                            SET
+                                status = 'OCCUPIED'
+                        
+                            WHERE table_id = ?
+                            `,
+                            [
+                                order.table_id
+                            ]
+                        );
+                    }
+                }
+            }
+        }        
         // -------------------------------------------------
         // 10. Recalculate folio
         // -------------------------------------------------

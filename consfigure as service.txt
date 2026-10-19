@@ -1,0 +1,67 @@
+2C. Install your Node API as a Windows service
+
+Let's assume your deployment folder is:
+
+C:\JaiHindPOS_Deploy
+
+and:
+
+C:\JaiHindPOS_Deploy\node\node.exe
+C:\JaiHindPOS_Deploy\api\server.js
+
+Open PowerShell as Administrator.
+
+Run:
+
+cd C:\nssm
+
+Then:
+
+.\nssm.exe install JaiHindPOSAPI
+
+A small NSSM configuration window will appear.
+
+Enter:
+
+Path
+C:\JaiHindPOS_Deploy\node\node.exe
+Startup directory
+C:\JaiHindPOS_Deploy\api
+Arguments
+server.js
+
+Then click Install service.
+
+NSSM's official usage documentation specifically supports this setup: application path, startup directory and arguments.
+
+2D. Set the service to Automatic
+
+Run:
+
+.\nssm.exe set JaiHindPOSAPI Start SERVICE_AUTO_START
+
+Then:
+
+.\nssm.exe start JaiHindPOSAPI
+
+Check:
+
+Get-Service JaiHindPOSAPI
+
+Expected:
+
+Status   Name
+------   ----
+Running  JaiHindPOSAPI
+
+You can also open:
+
+services.msc
+
+and you should see:
+
+JaiHindPOSAPI
+
+with startup type:
+
+Automatic

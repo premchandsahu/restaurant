@@ -63,4 +63,11 @@ router.get(
     authenticate,
     kotController.getKitchenStations
 );
+
+
+router.post('/stations', authenticate, kotController.createKitchenStation);
+router.put('/stations/:stationId', authenticate, kotController.updateKitchenStation);
+router.get('/menu-item-stations', authenticate, kotController.getMenuItemStationMappings);
+router.put('/menu-item-stations/:menuItemId', authenticate, kotController.saveMenuItemStationMappings);
+
 module.exports = router;

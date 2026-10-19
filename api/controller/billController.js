@@ -3,8 +3,182 @@ const crypto = require('crypto');
 
 const orderController = require('./orderController');
 
+const {
+    closeTableSessionIfSettled
+} = require('../services/qrSessionService');
+// ============================================================
+// GET BILL REQUESTS FROM CUSTOMER QR
+// ============================================================
 
+exports.getBillRequests = async (req, res) => {
 
+    const connection = await db.getConnection();
+
+    try {
+
+        const outletId =
+            Number(req.query.outletId);
+
+        if (!outletId) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'outletId is required'
+            });
+
+        }
+
+        // ------------------------------------------------------
+        // Verify outlet access
+        // ------------------------------------------------------
+
+        const [access] = await connection.query(
+            `
+            SELECT 1
+            FROM user_outlet uo
+
+            INNER JOIN outlet o
+                ON o.outlet_id = uo.outlet_id
+
+            WHERE uo.user_id = ?
+              AND uo.outlet_id = ?
+              AND o.company_id = ?
+              AND o.is_active = TRUE
+
+            LIMIT 1
+            `,
+            [
+                req.user.userId,
+                outletId,
+                req.user.companyId
+            ]
+        );
+
+        if (access.length === 0) {
+
+            return res.status(403).json({
+                success: false,
+                message:
+                    'You are not authorized for this outlet'
+            });
+
+        }
+
+        // ------------------------------------------------------
+        // Get orders for which customer has requested bill
+        // but bill has not yet been generated.
+        // ------------------------------------------------------
+
+        const [requests] = await connection.query(
+            `
+            SELECT
+
+                o.order_id,
+                o.order_no,
+                o.order_date,
+                o.order_time,
+
+                o.order_type,
+                o.order_source,
+                o.order_status,
+
+                o.table_id,
+                o.logical_table_id,
+
+                o.customer_session_id,
+
+                o.guest_count,
+                o.grand_total,
+
+                o.bill_requested,
+                o.bill_requested_at,
+
+                rt.table_code,
+                rt.table_name,
+
+                lt.logical_code,
+                lt.logical_name,
+
+                cs.customer_name,
+                cs.customer_phone
+
+            FROM orders o
+
+            LEFT JOIN restaurant_table rt
+                ON rt.table_id = o.table_id
+
+            LEFT JOIN logical_table lt
+                ON lt.logical_table_id =
+                   o.logical_table_id
+
+            LEFT JOIN customer_order_session cs
+                ON cs.customer_session_id =
+                   o.customer_session_id
+
+            WHERE o.outlet_id = ?
+
+              AND o.bill_requested = 1
+
+              AND o.order_status NOT IN (
+                  'BILLED',
+                  'PAID',
+                  'CANCELLED',
+                  'VOID',
+                  'MERGED'
+              )
+
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM bill b
+
+                  WHERE b.order_id = o.order_id
+
+                    AND b.bill_status NOT IN (
+                        'CANCELLED',
+                        'VOID'
+                    )
+              )
+
+            ORDER BY
+                o.bill_requested_at ASC,
+                o.order_id ASC
+            `,
+            [outletId]
+        );
+
+        return res.json({
+
+            success: true,
+
+            count: requests.length,
+
+            requests
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            'Get bill requests error:',
+            error
+        );
+
+        return res.status(500).json({
+
+            success: false,
+
+            message:
+                'Unable to get bill requests'
+
+        });
+
+    } finally {
+
+        connection.release();
+
+    }
+
+};
 
 exports.getPendingBills = async (req, res) => {
     const connection = await db.getConnection();
@@ -378,10 +552,11 @@ exports.addPayment = async (req, res) => {
         // Release logical table
         // --------------------------------------------
         const [orderRows] = await connection.query(
-          `
+        `
           SELECT
               table_id,
-              logical_table_id
+              logical_table_id,
+              table_session_id
           FROM orders
           WHERE order_id = ?
           FOR UPDATE
@@ -449,6 +624,18 @@ exports.addPayment = async (req, res) => {
                 [order.table_id]
               );
             }
+                      // ------------------------------------------
+          // Close QR/table session when all orders
+          // belonging to this session are settled.
+          // For normal POS orders table_session_id
+          // will normally be NULL, so nothing changes.
+          // ------------------------------------------
+          if (order.table_session_id) {
+            await closeTableSessionIfSettled(
+              connection,
+              order.table_session_id
+            );
+          }
           }
         }
       }

@@ -134,6 +134,54 @@ class InventorySupplierPaymentService {
         .toList();
   }
 
+  /// Returns all suppliers, including inactive records, for Supplier Master.
+  /// The existing getSuppliers() remains active-only for payment selection.
+  Future<List<InventorySupplier>> getSuppliersForMaster() async {
+    final response = await http.get(
+      Uri.parse('$baseUrl/inventory/suppliers'),
+      headers: _headers,
+    );
+
+    final data = _decode(response);
+    _throwIfFailed(response, data);
+
+    final rows = data['suppliers'] as List? ?? const [];
+    return rows
+        .map((e) => InventorySupplier.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
+  }
+
+  Future<InventorySupplier> createSupplier({
+    required Map<String, dynamic> payload,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/inventory/suppliers'),
+      headers: _headers,
+      body: jsonEncode(payload),
+    );
+
+    final data = _decode(response);
+    _throwIfFailed(response, data);
+
+    return InventorySupplier.fromJson(
+      Map<String, dynamic>.from(data['supplier'] as Map),
+    );
+  }
+
+  Future<void> updateSupplier({
+    required int supplierId,
+    required Map<String, dynamic> payload,
+  }) async {
+    final response = await http.put(
+      Uri.parse('$baseUrl/inventory/suppliers/$supplierId'),
+      headers: _headers,
+      body: jsonEncode(payload),
+    );
+
+    final data = _decode(response);
+    _throwIfFailed(response, data);
+  }
+
   dynamic _decode(http.Response response) {
     try {
       return jsonDecode(response.body);

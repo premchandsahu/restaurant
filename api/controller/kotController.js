@@ -1224,6 +1224,12 @@ exports.getKitchenStations = async (
         await db.getConnection();
     try {
 
+        const includeInactive = req.query.includeInactive === '1' ? 1 : 0;
+        const outletId = req.query.outletId ? Number(req.query.outletId) : null;
+        if (outletId !== null && (!Number.isSafeInteger(outletId) || outletId <= 0)) {
+          return res.status(400).json({ success: false, message: 'Invalid outletId' });
+        }
+
         const [stations] =
             await connection.query(
                 `
@@ -1233,7 +1239,8 @@ exports.getKitchenStations = async (
                     ks.station_code,
                     ks.station_name,
                     ks.printer_id,
-                    ks.display_order
+                    ks.display_order,
+                    ks.is_active
 
                 FROM kitchen_station ks
 
@@ -1246,11 +1253,10 @@ exports.getKitchenStations = async (
                        ks.outlet_id
 
                 WHERE
-                    ks.is_active = TRUE
-
+                     (? = 1 OR ks.is_active = TRUE)
                     AND ot.company_id = ?
-
                     AND uo.user_id = ?
+                    AND (? IS NULL OR ks.outlet_id = ?)
 
                 ORDER BY
                     ks.outlet_id,
@@ -1258,8 +1264,11 @@ exports.getKitchenStations = async (
                     ks.kitchen_station_id
                 `,
                 [
-                    req.user.companyId,
-                    req.user.userId
+                     includeInactive,
+                     req.user.companyId,
+                     req.user.userId,
+                     outletId,
+                     outletId
                 ]
             );
 
@@ -1283,4 +1292,295 @@ exports.getKitchenStations = async (
                 'Unable to get kitchen stations'
         });
     }
+};
+
+
+
+async function kitchenStationHasOutletAccess(connection, req, outletId) {
+  const [rows] = await connection.query(
+    `SELECT ot.outlet_id
+     FROM outlet ot
+     INNER JOIN user_outlet uo ON uo.outlet_id = ot.outlet_id
+     WHERE ot.outlet_id = ?
+       AND ot.company_id = ?
+       AND uo.user_id = ?
+     LIMIT 1`,
+    [outletId, req.user.companyId, req.user.userId]
+  );
+  return rows.length > 0;
+}
+
+function parseKitchenStationBoolean(value, fallback = true) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  const text = String(value).toLowerCase();
+  return text === '1' || text === 'true';
+}
+
+function parseKitchenStationPayload(body) {
+  const outletId = Number(body.outletId);
+  const stationCode = String(body.stationCode || '').trim();
+  const stationName = String(body.stationName || '').trim();
+  const displayOrder = body.displayOrder === undefined
+    ? 0
+    : Number(body.displayOrder);
+  const printerId = body.printerId === '' || body.printerId === undefined || body.printerId === null
+    ? null
+    : Number(body.printerId);
+  const isActive = parseKitchenStationBoolean(body.isActive, true);
+
+  if (!Number.isSafeInteger(outletId) || outletId <= 0) {
+    return { error: 'Valid outletId is required' };
+  }
+  if (!stationCode || stationCode.length > 50) {
+    return { error: 'Station code is required and must not exceed 50 characters' };
+  }
+  if (!stationName || stationName.length > 100) {
+    return { error: 'Station name is required and must not exceed 100 characters' };
+  }
+  if (!Number.isSafeInteger(displayOrder) || displayOrder < 0) {
+    return { error: 'displayOrder must be a whole number 0 or greater' };
+  }
+  if (printerId !== null && (!Number.isSafeInteger(printerId) || printerId <= 0)) {
+    return { error: 'printerId must be a positive whole number or null' };
+  }
+
+  return {
+    value: {
+      outletId,
+      stationCode,
+      stationName,
+      printerId,
+      displayOrder,
+      isActive: isActive ? 1 : 0,
+    },
+  };
+}
+
+exports.createKitchenStation = async (req, res) => {
+  let connection;
+  try {
+    const parsed = parseKitchenStationPayload(req.body || {});
+    if (parsed.error) {
+      return res.status(400).json({ success: false, message: parsed.error });
+    }
+    const station = parsed.value;
+    connection = await db.getConnection();
+
+    if (!(await kitchenStationHasOutletAccess(connection, req, station.outletId))) {
+      return res.status(403).json({ success: false, message: 'Outlet access denied' });
+    }
+
+    const [result] = await connection.query(
+      `INSERT INTO kitchen_station
+         (outlet_id, station_code, station_name, printer_id, display_order, is_active)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        station.outletId,
+        station.stationCode,
+        station.stationName,
+        station.printerId,
+        station.displayOrder,
+        station.isActive,
+      ]
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: 'Kitchen station created successfully',
+      kitchenStationId: result.insertId,
+    });
+  } catch (error) {
+    console.error('Create kitchen station error:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: 'A station with this code already exists' });
+    }
+    return res.status(500).json({ success: false, message: 'Unable to create kitchen station' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+exports.updateKitchenStation = async (req, res) => {
+  let connection;
+  try {
+    const stationId = Number(req.params.stationId);
+    const parsed = parseKitchenStationPayload(req.body || {});
+    if (!Number.isSafeInteger(stationId) || stationId <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid stationId' });
+    }
+    if (parsed.error) {
+      return res.status(400).json({ success: false, message: parsed.error });
+    }
+    const station = parsed.value;
+    connection = await db.getConnection();
+
+    if (!(await kitchenStationHasOutletAccess(connection, req, station.outletId))) {
+      return res.status(403).json({ success: false, message: 'Outlet access denied' });
+    }
+
+    const [existing] = await connection.query(
+      `SELECT kitchen_station_id
+       FROM kitchen_station
+       WHERE kitchen_station_id = ? AND outlet_id = ?
+       LIMIT 1`,
+      [stationId, station.outletId]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ success: false, message: 'Kitchen station not found for this outlet' });
+    }
+
+    await connection.query(
+      `UPDATE kitchen_station
+       SET station_code = ?,
+           station_name = ?,
+           printer_id = ?,
+           display_order = ?,
+           is_active = ?
+       WHERE kitchen_station_id = ? AND outlet_id = ?`,
+      [
+        station.stationCode,
+        station.stationName,
+        station.printerId,
+        station.displayOrder,
+        station.isActive,
+        stationId,
+        station.outletId,
+      ]
+    );
+
+    return res.json({ success: true, message: 'Kitchen station updated successfully' });
+  } catch (error) {
+    console.error('Update kitchen station error:', error);
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: 'A station with this code already exists' });
+    }
+    return res.status(500).json({ success: false, message: 'Unable to update kitchen station' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+exports.getMenuItemStationMappings = async (req, res) => {
+  let connection;
+  try {
+    const outletId = Number(req.query.outletId);
+    if (!Number.isSafeInteger(outletId) || outletId <= 0) {
+      return res.status(400).json({ success: false, message: 'Valid outletId is required' });
+    }
+    connection = await db.getConnection();
+
+    if (!(await kitchenStationHasOutletAccess(connection, req, outletId))) {
+      return res.status(403).json({ success: false, message: 'Outlet access denied' });
+    }
+
+    const [mappings] = await connection.query(
+      `SELECT menu_item_id, kitchen_station_id
+       FROM menu_item_kitchen_station
+       WHERE outlet_id = ?
+       ORDER BY menu_item_id, kitchen_station_id`,
+      [outletId]
+    );
+
+    return res.json({ success: true, mappings });
+  } catch (error) {
+    console.error('Get menu item station mappings error:', error);
+    return res.status(500).json({ success: false, message: 'Unable to load menu item station mappings' });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
+exports.saveMenuItemStationMappings = async (req, res) => {
+  let connection;
+  let transactionStarted = false;
+  try {
+    const outletId = Number(req.body?.outletId);
+    const menuItemId = Number(req.params.menuItemId);
+    const stationIdsRaw = req.body?.kitchenStationIds;
+
+    if (!Number.isSafeInteger(outletId) || outletId <= 0 ||
+        !Number.isSafeInteger(menuItemId) || menuItemId <= 0 ||
+        !Array.isArray(stationIdsRaw)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid outletId, menuItemId and kitchenStationIds array are required',
+      });
+    }
+
+    const stationIds = stationIdsRaw.map(Number);
+    if (stationIds.some(id => !Number.isSafeInteger(id) || id <= 0) ||
+        new Set(stationIds).size !== stationIds.length) {
+      return res.status(400).json({ success: false, message: 'Kitchen station IDs must be valid and unique' });
+    }
+
+    connection = await db.getConnection();
+    if (!(await kitchenStationHasOutletAccess(connection, req, outletId))) {
+      return res.status(403).json({ success: false, message: 'Outlet access denied' });
+    }
+
+    const [items] = await connection.query(
+      `SELECT menu_item_id
+       FROM menu_item
+       WHERE menu_item_id = ? AND outlet_id = ?
+       LIMIT 1`,
+      [menuItemId, outletId]
+    );
+    if (items.length === 0) {
+      return res.status(404).json({ success: false, message: 'Menu item not found for this outlet' });
+    }
+
+    if (stationIds.length > 0) {
+      const [stations] = await connection.query(
+        `SELECT kitchen_station_id
+         FROM kitchen_station
+         WHERE outlet_id = ?
+           AND is_active = TRUE
+           AND kitchen_station_id IN (?)`,
+        [outletId, stationIds]
+      );
+      if (stations.length !== stationIds.length) {
+        return res.status(400).json({
+          success: false,
+          message: 'One or more selected stations are inactive or belong to another outlet',
+        });
+      }
+    }
+
+    await connection.beginTransaction();
+    transactionStarted = true;
+
+    await connection.query(
+      `DELETE FROM menu_item_kitchen_station
+       WHERE outlet_id = ? AND menu_item_id = ?`,
+      [outletId, menuItemId]
+    );
+
+    for (const stationId of stationIds) {
+      await connection.query(
+        `INSERT INTO menu_item_kitchen_station
+           (outlet_id, menu_item_id, kitchen_station_id)
+         VALUES (?, ?, ?)`,
+        [outletId, menuItemId, stationId]
+      );
+    }
+
+    await connection.commit();
+    transactionStarted = false;
+
+    return res.json({
+      success: true,
+      message: 'Menu item kitchen station mappings saved successfully',
+      outletId,
+      menuItemId,
+      kitchenStationIds: stationIds,
+    });
+  } catch (error) {
+    if (connection && transactionStarted) await connection.rollback();
+    console.error('Save menu item station mappings error:', error);
+    return res.status(500).json({ success: false, message: 'Unable to save menu item station mappings' });
+  } finally {
+    if (connection) connection.release();
+  }
 };

@@ -18,6 +18,8 @@ const stockAdjustmentRoutes = require('./stockAdjustmentRouter');
 const recipeRoutes = require('./recipeRouter');
 const inventoryConsumptionRoutes =
     require('./inventoryConsumptionRouter');
+const exciseRoutes = require('./exciseRouter')
+
 
 module.exports = {
     authRoutes,
@@ -37,5 +39,6 @@ module.exports = {
     supplierLedgerRoutes,
     stockAdjustmentRoutes,
     recipeRoutes,
-    inventoryConsumptionRoutes
+    inventoryConsumptionRoutes,
+    exciseRoutes
 }

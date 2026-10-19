@@ -23,6 +23,8 @@ class PosCartPanel extends StatelessWidget {
   final VoidCallback? onSaveOrder;
   final VoidCallback? onCreateBill;
   final bool canCreateBill;
+  final bool canSaveOrder;
+  final bool canSendToKitchen;
   const PosCartPanel({
     super.key,
     required this.items,
@@ -38,6 +40,8 @@ class PosCartPanel extends StatelessWidget {
     this.onSaveOrder,
     this.onCreateBill,
     this.canCreateBill = true,
+    this.canSaveOrder = true,
+    this.canSendToKitchen = true,
   });
 
   // --------------------------------------------------
@@ -258,7 +262,9 @@ class PosCartPanel extends StatelessWidget {
           // -----------------------------------------
           // Send to kitchen
           // -----------------------------------------
-          if (onSendToKitchen != null)
+          if (onSendToKitchen != null ||
+              onSaveOrder != null ||
+              onCreateBill != null)
             Padding(
               padding: const EdgeInsets.all(12),
 
@@ -271,7 +277,7 @@ class PosCartPanel extends StatelessWidget {
                   children: [
                     Expanded(
                       child: OutlinedButton.icon(
-                        onPressed: onSaveOrder,
+                        onPressed: canSaveOrder ? onSaveOrder : null,
                         icon: const Icon(Icons.save),
                         label: const Text('SAVE ORDER'),
                       ),
@@ -281,7 +287,7 @@ class PosCartPanel extends StatelessWidget {
 
                     Expanded(
                       child: ElevatedButton.icon(
-                        onPressed: onSendToKitchen,
+                        onPressed: canSendToKitchen ? onSendToKitchen : null,
                         icon: const Icon(Icons.restaurant),
                         label: const Text('SEND TO KITCHEN'),
                       ),

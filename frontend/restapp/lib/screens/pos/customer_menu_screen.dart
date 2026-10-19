@@ -7,11 +7,12 @@ import '../../services/pos/customer_order_service.dart';
 class CustomerMenuScreen extends StatefulWidget {
   final String customerSessionToken;
   final String baseUrl;
-
+  final int? existingOrderId;
   const CustomerMenuScreen({
     super.key,
     required this.customerSessionToken,
     required this.baseUrl,
+    this.existingOrderId,
   });
 
   @override
@@ -752,7 +753,14 @@ class _CustomerMenuScreenState extends State<CustomerMenuScreen> {
 
     await Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => CustomerCartScreen(cart: _cart)),
+      MaterialPageRoute(
+        builder: (_) => CustomerCartScreen(
+          cart: _cart,
+          customerSessionToken: widget.customerSessionToken,
+          baseUrl: widget.baseUrl,
+          existingOrderId: widget.existingOrderId,
+        ),
+      ),
     );
 
     if (mounted) {

@@ -12,7 +12,7 @@ class PosVariant {
 
   final int displayOrder;
   final bool isDefault;
-
+  final bool isActive;
   const PosVariant({
     required this.variantId,
     required this.variantUuid,
@@ -23,6 +23,7 @@ class PosVariant {
     this.taxGroupId,
     this.displayOrder = 0,
     this.isDefault = false,
+    this.isActive = true,
   });
 
   factory PosVariant.fromJson(Map<String, dynamic> json) {
@@ -44,6 +45,11 @@ class PosVariant {
       displayOrder: _int(json['display_order']),
 
       isDefault: _bool(json['is_default']),
+
+      isActive:
+          (json['is_active'] ?? json['isActive'] ?? true) == true ||
+          (json['is_active'] ?? json['isActive']) == 1 ||
+          (json['is_active'] ?? json['isActive']) == '1',
     );
   }
 
